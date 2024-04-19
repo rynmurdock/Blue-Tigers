@@ -1,5 +1,5 @@
 
-STEPS = 6
+STEPS = 3
 output_hidden_state = False
 
 from sfast.compilers.diffusion_pipeline_compiler import (compile,
@@ -55,11 +55,10 @@ from safetensors.torch import load_file
 from PIL import Image
 from transformers import CLIPVisionModelWithProjection
 import uuid
-import cv2
+import av
 
 def write_video(file_name, images, fps=10):
     print('Saving')
-    fps = 7
     container = av.open(file_name, mode="w")
 
     stream = container.add_stream("h264", rate=fps)
@@ -82,6 +81,11 @@ def write_video(file_name, images, fps=10):
     container.close()
     print('Saved')
 
+#    writer = imageio.get_writer(file_name, fps=fps)
+#    for im in images:
+#        writer.append_data(np.asarray(im))
+#    writer.close()
+
 
 
 
@@ -103,21 +107,21 @@ motion_loaded = None
 device = "cuda"
 dtype = torch.float16
 image_encoder = CLIPVisionModelWithProjection.from_pretrained("h94/IP-Adapter", subfolder="models/image_encoder", torch_dtype=dtype).to(DEVICE)
-#vae = AutoencoderTiny.from_pretrained("madebyollin/taesd", torch_dtype=dtype)
+# vae = AutoencoderTiny.from_pretrained("madebyollin/taesd", torch_dtype=dtype)
 
 
-adapter = MotionAdapter.from_pretrained("wangfuyun/AnimateLCM")
-pipe = AnimateDiffPipeline.from_pretrained("emilianJR/epiCRealism", motion_adapter=adapter, image_encoder=image_encoder, torch_dtype=dtype)#, vae=vae)
-pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config, beta_schedule="linear")
-pipe.load_lora_weights("wangfuyun/AnimateLCM", weight_name="AnimateLCM_sd15_t2v_lora.safetensors", adapter_name="lcm-lora",)
-pipe.set_adapters(["lcm-lora"], [.8])
-pipe.fuse_lora()
+#adapter = MotionAdapter.from_pretrained("wangfuyun/AnimateLCM")
+#pipe = AnimateDiffPipeline.from_pretrained("emilianJR/epiCRealism", motion_adapter=adapter, image_encoder=image_encoder, torch_dtype=dtype)#, vae=vae)
+#pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config, beta_schedule="linear")
+#pipe.load_lora_weights("wangfuyun/AnimateLCM", weight_name="AnimateLCM_sd15_t2v_lora.safetensors", adapter_name="lcm-lora",)
+#pipe.set_adapters(["lcm-lora"], [.8])
+#pipe.fuse_lora()
 
-#pipe = AnimateDiffPipeline.from_pretrained('emilianJR/epiCRealism', torch_dtype=dtype, vae=vae, image_encoder=image_encoder)
-#pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing", beta_schedule="linear")
-#repo = "ByteDance/AnimateDiff-Lightning"
-#ckpt = f"animatediff_lightning_8step_diffusers.safetensors"
-#pipe.unet.load_state_dict(load_file(hf_hub_download(repo, ckpt), device='cpu'), strict=False)
+pipe = AnimateDiffPipeline.from_pretrained('emilianJR/epiCRealism', torch_dtype=dtype, image_encoder=image_encoder)
+pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing", beta_schedule="linear")
+repo = "ByteDance/AnimateDiff-Lightning"
+ckpt = f"animatediff_lightning_2step_diffusers.safetensors"
+pipe.unet.load_state_dict(load_file(hf_hub_download(repo, ckpt), device='cpu'), strict=False)
 
 
 
@@ -243,11 +247,11 @@ def next_image(embs, ys, calibrate_prompts):
             chosen_y = np.array([ys[i] for i in indices] + [0]*16)
             
             print(indices, chosen_y, '\n', len(chosen_y), len(feature_embs))
-
+            print('Gathering coefficients')
             lin_class = SVC(max_iter=50000, kernel='linear', class_weight='balanced').fit(feature_embs, chosen_y)
             coef_ = torch.tensor(lin_class.coef_, dtype=torch.double)
             coef_ = (coef_.flatten() / (coef_.flatten().norm())).unsqueeze(0)
-            coef_ = coef_
+            print('Gathered')
 
             rng_prompt = random.choice(prompt_list)
             w = 1.25# if len(embs) % 2 == 0 else 0
@@ -374,7 +378,7 @@ with gr.Blocks(css=css, head=js_head) as demo:
 
     with gr.Row(elem_id='output-image'):
         img = gr.Video(
-        label='Built from AnimateLCM',
+        label='Built from AnimateDiff-Lightning',
         autoplay=True,
         interactive=False,
         height=512,
@@ -407,7 +411,7 @@ with gr.Blocks(css=css, head=js_head) as demo:
                  [b1, b2, b3, b4, img, embs, ys, calibrate_prompts])
     with gr.Row():
         html = gr.HTML('''<div style='text-align:center; font-size:20px'>You will calibrate for several prompts and then roam. </ div><br><br><br>
-<div style='text-align:center; font-size:14px'>Note that while the safety-check-filtered AnimateLCM model is unlikely to produce NSFW images, this may still occur, and users should avoid NSFW content when rating.
+<div style='text-align:center; font-size:14px'>Note that while the safety-check-filtered AnimateDiff-Lightning model is unlikely to produce NSFW images, this may still occur, and users should avoid NSFW content when rating.
 </ div>''')
 
 demo.launch(share=True)
