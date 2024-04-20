@@ -204,7 +204,9 @@ def next_image(embs, ys, calibrate_prompts):
                 pos_indices = pos_indices[21:]
             elif len(neg_indices) - len(pos_indices) > 10 and len(neg_indices) > 20:
                 neg_indices = neg_indices[21:]
+            print(len(pos_indices), len(neg_indices))
             indices = pos_indices + neg_indices
+            embs = embs[indices]
             
             # also add the latest 0 and the latest 1
             has_0 = False
