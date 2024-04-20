@@ -208,6 +208,8 @@ def next_image(embs, ys, calibrate_prompts):
             indices = pos_indices + neg_indices
             embs = [embs[i] for i in indices]
             ys = [ys[i] for i in indices]
+
+            indices = list(range(len(embs)))
             
             # also add the latest 0 and the latest 1
             has_0 = False
