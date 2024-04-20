@@ -20,17 +20,16 @@ model = tf.keras.models.load_model('nsfweffnetv2-b02-3epochs.h5',custom_objects=
 def maybe_nsfw(pil_image):
     # Run prediction
     imm = tensorflow.image.resize(np.array(pil_image)[:, :, :3], (260, 260))
-    imm = (imm / 255) * 2 - 1
+    imm = (imm / 255)
     pred = model(tensorflow.expand_dims(imm, 0)).numpy()
     print(tensorflow.math.softmax(pred[0]).numpy())
-    if all([i < .25 for i in tensorflow.math.softmax(pred[0]).numpy()[[1, 3]]]):
+    if all([i < .3 for i in tensorflow.math.softmax(pred[0]).numpy()[[1, 3, 4]]]):
         return False
     return True
 
 # pre-initializing prediction
 maybe_nsfw(Image. new("RGB", (260, 260), 255))
 model.load_weights('nsfweffnetv2-b02-3epochs.h5', by_name=True, )
-
 
 
 

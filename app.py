@@ -7,12 +7,7 @@ from safety_checker_improved import maybe_nsfw
 from sfast.compilers.diffusion_pipeline_compiler import (compile,
                                                          CompilationConfig)
 config = CompilationConfig.Default()
-# xformers and Triton are suggested for achieving best performance.
-#try:
-#    import xformers
-#    config.enable_xformers = True
-#except ImportError:
-#    print('xformers not installed, skip')
+
 try:
     import triton
     config.enable_triton = True
@@ -74,19 +69,12 @@ def write_video(file_name, images, fps=10):
         frame = av.VideoFrame.from_ndarray(img, format="rgb24")
         for packet in stream.encode(frame):
             container.mux(packet)
-
     # Flush stream
     for packet in stream.encode():
         container.mux(packet)
-
     # Close the file
     container.close()
     print('Saved')
-
-#    writer = imageio.get_writer(file_name, fps=fps)
-#    for im in images:
-#        writer.append_data(np.asarray(im))
-#    writer.close()
 
 
 
@@ -98,13 +86,8 @@ bases = {
     #SG161222/Realistic_Vision_V6.0_B1_noVAE
     #runwayml/stable-diffusion-v1-5
     #frankjoshua/realisticVisionV51_v51VAE
-    #frankjoshua/toonyou_beta6
     #Lykon/dreamshaper-7
-    #digiplay/Juggernaut_final
 }
-step_loaded = None
-base_loaded = "basem"
-motion_loaded = None
 
 device = "cuda"
 dtype = torch.float16
@@ -141,18 +124,6 @@ leave_im_emb, _ = pipe.encode_image(
 assert len(output.frames[0]) == 16
 leave_im_emb.to('cpu')
 
-# Safety checkers
-#from safety_checker import StableDiffusionSafetyChecker
-#from transformers import CLIPFeatureExtractor
-
-#safety_checker = StableDiffusionSafetyChecker.from_pretrained("CompVis/stable-diffusion-safety-checker").to(DEVICE).to(dtype)
-#feature_extractor = CLIPFeatureExtractor.from_pretrained("openai/clip-vit-base-patch32")
-
-#def check_nsfw_images(images):
-#    safety_checker_input = feature_extractor(images, return_tensors="pt").to(DEVICE)
-#    has_nsfw_concepts = safety_checker(images=[images], clip_input=safety_checker_input.pixel_values.to(DEVICE).to(dtype))
-#    return any(has_nsfw_concepts)
-
 # Function 
 # TODO put back
 # @spaces.GPU()
@@ -175,10 +146,12 @@ def generate(prompt, im_embs=None, base='basem'):
     
     name = str(uuid.uuid4()).replace("-", "")
     path = f"/tmp/{name}.mp4"
+    
     if nsfw:
         gr.Warning("NSFW content detected.")
-        # TODO could return an automatic dislike of auto dislike (unless neither) on the backend; just would need refactoring.
+        # TODO could return an automatic dislike of auto dislike on the backend for neither as well; just would need refactoring.
         return None, [imb.to('cpu').unsqueeze(0) for imb in im_emb]
+    
     write_video(path, output.frames[0])
     return path, [imb.to('cpu').unsqueeze(0) for imb in im_emb]
 
@@ -211,7 +184,7 @@ def next_image(embs, ys, calibrate_prompts):
         else:
             print('######### Roaming #########')
             # sample a .8 of rated embeddings for some stochasticity, or at least two embeddings.
-            n_to_choose = max(int((len(embs))), 2)
+            n_to_choose = max(int((len(embs)*.8)), 2)
             indices = random.sample(range(len(embs)), n_to_choose)
             
             # sample only as many negatives as there are positives
@@ -263,9 +236,9 @@ def next_image(embs, ys, calibrate_prompts):
             image, im_emb = generate(prompt, im_emb)
             embs += im_emb
             
-            #if len(embs) > 100:
-            #    embs.pop(0)
-            #    ys.pop(0)
+            if len(embs) > 50:
+                embs.pop(0)
+                ys.pop(0)
             
             return image, embs, ys, calibrate_prompts
 
@@ -363,14 +336,6 @@ document.body.addEventListener('click', function(event) {
 </script>
 '''
 
-#js = '''
-#document.body.addEventListener('loadeddata', (e) => {
-#  document.querySelector('[data-testid="Lightning-player"]').loop = true;
-#})
-
-#def replay(video):
-#    return video
-
 with gr.Blocks(css=css, head=js_head) as demo:
     gr.Markdown('''### Blue Tigers: Generative Recommenders for Exporation of Video.
     Explore the latent space without text prompts, based on your preferences. Learn more on [the write-up](https://rynmurdock.github.io/posts/2024/3/generative_recomenders/).
@@ -378,7 +343,7 @@ with gr.Blocks(css=css, head=js_head) as demo:
     embs = gr.State([])
     ys = gr.State([])
     calibrate_prompts = gr.State([
-    'a surrealist film featuring a tree',
+    'a still life featuring a glass of green tea.',
     'a sea slug -- pair of claws scuttling -- jelly fish glowing',
     'an adorable creature. It may be a goblin or a pig or a slug.',
     'an animation about a gorgeous nebula',
@@ -399,7 +364,6 @@ with gr.Blocks(css=css, head=js_head) as demo:
         elem_id="video_output"
        )
         img.play(l, js='''document.querySelector('[data-testid="Lightning-player"]').loop = true''')
-    #img.end(replay, inputs=img, outputs=img)
     with gr.Row(equal_height=True):
         b3 = gr.Button(value='Dislike (A)', interactive=False, elem_id="dislike")
         b2 = gr.Button(value='Neither (Space)', interactive=False, elem_id="neither")
