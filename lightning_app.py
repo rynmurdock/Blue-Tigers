@@ -1,5 +1,5 @@
 
-STEPS = 3
+STEPS = 4
 output_hidden_state = False
 
 from sfast.compilers.diffusion_pipeline_compiler import (compile,
@@ -120,7 +120,7 @@ image_encoder = CLIPVisionModelWithProjection.from_pretrained("h94/IP-Adapter", 
 pipe = AnimateDiffPipeline.from_pretrained('emilianJR/epiCRealism', torch_dtype=dtype, image_encoder=image_encoder)
 pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing", beta_schedule="linear")
 repo = "ByteDance/AnimateDiff-Lightning"
-ckpt = f"animatediff_lightning_2step_diffusers.safetensors"
+ckpt = f"animatediff_lightning_4step_diffusers.safetensors"
 pipe.unet.load_state_dict(load_file(hf_hub_download(repo, ckpt), device='cpu'), strict=False)
 
 
@@ -358,8 +358,17 @@ document.body.addEventListener('click', function(event) {
       fadeInOut(target, '#cccccc');
     }
 });
+
 </script>
 '''
+
+#js = '''
+#document.body.addEventListener('loadeddata', (e) => {
+#  document.querySelector('[data-testid="Lightning-player"]').loop = true;
+#})
+
+#def replay(video):
+#    return video
 
 with gr.Blocks(css=css, head=js_head) as demo:
     gr.Markdown('''### Blue Tigers: Generative Recommenders for Exporation of Video.
@@ -375,16 +384,21 @@ with gr.Blocks(css=css, head=js_head) as demo:
     'an octopus writhes',
     'the moon is melting into my glass of tea',
     ])
+    def l():
+        return None
 
     with gr.Row(elem_id='output-image'):
         img = gr.Video(
-        label='Built from AnimateDiff-Lightning',
+        label='Lightning',
         autoplay=True,
         interactive=False,
         height=512,
         width=512,
+        include_audio=False,
         elem_id="video_output"
        )
+        img.play(l, js='''document.querySelector('[data-testid="Lightning-player"]').loop = true''')
+    #img.end(replay, inputs=img, outputs=img)
     with gr.Row(equal_height=True):
         b3 = gr.Button(value='Dislike (A)', interactive=False, elem_id="dislike")
         b2 = gr.Button(value='Neither (Space)', interactive=False, elem_id="neither")
@@ -412,6 +426,9 @@ with gr.Blocks(css=css, head=js_head) as demo:
     with gr.Row():
         html = gr.HTML('''<div style='text-align:center; font-size:20px'>You will calibrate for several prompts and then roam. </ div><br><br><br>
 <div style='text-align:center; font-size:14px'>Note that while the safety-check-filtered AnimateDiff-Lightning model is unlikely to produce NSFW images, this may still occur, and users should avoid NSFW content when rating.
+</ div>
+<br><br>
+<div style='text-align:center; font-size:14px'>Thanks to @multimodalart for their contributions to the demo, esp. the interface.
 </ div>''')
 
 demo.launch(share=True)

@@ -2,6 +2,8 @@
 STEPS = 6
 output_hidden_state = False
 
+from safety_checker_improved import maybe_nsfw
+
 from sfast.compilers.diffusion_pipeline_compiler import (compile,
                                                          CompilationConfig)
 config = CompilationConfig.Default()
@@ -55,11 +57,10 @@ from safetensors.torch import load_file
 from PIL import Image
 from transformers import CLIPVisionModelWithProjection
 import uuid
-import cv2
+import av
 
 def write_video(file_name, images, fps=10):
     print('Saving')
-    fps = 7
     container = av.open(file_name, mode="w")
 
     stream = container.add_stream("h264", rate=fps)
@@ -82,6 +83,11 @@ def write_video(file_name, images, fps=10):
     container.close()
     print('Saved')
 
+#    writer = imageio.get_writer(file_name, fps=fps)
+#    for im in images:
+#        writer.append_data(np.asarray(im))
+#    writer.close()
+
 
 
 
@@ -103,7 +109,7 @@ motion_loaded = None
 device = "cuda"
 dtype = torch.float16
 image_encoder = CLIPVisionModelWithProjection.from_pretrained("h94/IP-Adapter", subfolder="models/image_encoder", torch_dtype=dtype).to(DEVICE)
-#vae = AutoencoderTiny.from_pretrained("madebyollin/taesd", torch_dtype=dtype)
+# vae = AutoencoderTiny.from_pretrained("madebyollin/taesd", torch_dtype=dtype)
 
 
 adapter = MotionAdapter.from_pretrained("wangfuyun/AnimateLCM")
@@ -113,16 +119,15 @@ pipe.load_lora_weights("wangfuyun/AnimateLCM", weight_name="AnimateLCM_sd15_t2v_
 pipe.set_adapters(["lcm-lora"], [.8])
 pipe.fuse_lora()
 
-#pipe = AnimateDiffPipeline.from_pretrained('emilianJR/epiCRealism', torch_dtype=dtype, vae=vae, image_encoder=image_encoder)
+#pipe = AnimateDiffPipeline.from_pretrained('emilianJR/epiCRealism', torch_dtype=dtype, image_encoder=image_encoder)
 #pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing", beta_schedule="linear")
 #repo = "ByteDance/AnimateDiff-Lightning"
-#ckpt = f"animatediff_lightning_8step_diffusers.safetensors"
+#ckpt = f"animatediff_lightning_4step_diffusers.safetensors"
 #pipe.unet.load_state_dict(load_file(hf_hub_download(repo, ckpt), device='cpu'), strict=False)
 
 
 
 pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15.bin", map_location='cpu')
-#pipe.unet._load_ip_adapter_weights(torch.load(hf_hub_download('h94/IP-Adapter', 'models/ip-adapter-plus_sd15.bin')))
 pipe.set_ip_adapter_scale(1.)
 pipe.unet.fuse_qkv_projections()
 pipe = compile(pipe, config=config)
@@ -137,16 +142,16 @@ assert len(output.frames[0]) == 16
 leave_im_emb.to('cpu')
 
 # Safety checkers
-from safety_checker import StableDiffusionSafetyChecker
-from transformers import CLIPFeatureExtractor
+#from safety_checker import StableDiffusionSafetyChecker
+#from transformers import CLIPFeatureExtractor
 
-safety_checker = StableDiffusionSafetyChecker.from_pretrained("CompVis/stable-diffusion-safety-checker").to(DEVICE).to(dtype)
-feature_extractor = CLIPFeatureExtractor.from_pretrained("openai/clip-vit-base-patch32")
+#safety_checker = StableDiffusionSafetyChecker.from_pretrained("CompVis/stable-diffusion-safety-checker").to(DEVICE).to(dtype)
+#feature_extractor = CLIPFeatureExtractor.from_pretrained("openai/clip-vit-base-patch32")
 
-def check_nsfw_images(images):
-    safety_checker_input = feature_extractor(images, return_tensors="pt").to(DEVICE)
-    has_nsfw_concepts = safety_checker(images=[images], clip_input=safety_checker_input.pixel_values.to(DEVICE).to(dtype))
-    return any(has_nsfw_concepts)
+#def check_nsfw_images(images):
+#    safety_checker_input = feature_extractor(images, return_tensors="pt").to(DEVICE)
+#    has_nsfw_concepts = safety_checker(images=[images], clip_input=safety_checker_input.pixel_values.to(DEVICE).to(dtype))
+#    return any(has_nsfw_concepts)
 
 # Function 
 # TODO put back
@@ -166,13 +171,13 @@ def generate(prompt, im_embs=None, base='basem'):
                 output.frames[0], DEVICE, 1, output_hidden_state
             )
 
-    has_nsfw_concepts = check_nsfw_images(output.frames[0][len(output.frames[0])//2])
+    nsfw = maybe_nsfw(output.frames[0][len(output.frames[0])//2])
     
     name = str(uuid.uuid4()).replace("-", "")
     path = f"/tmp/{name}.mp4"
-    if has_nsfw_concepts:
+    if nsfw:
         gr.Warning("NSFW content detected.")
-        # TODO could return an automatic dislike; just would need refactoring.
+        # TODO could return an automatic dislike of auto dislike (unless neither) on the backend; just would need refactoring.
         return None, [imb.to('cpu').unsqueeze(0) for imb in im_emb]
     write_video(path, output.frames[0])
     return path, [imb.to('cpu').unsqueeze(0) for imb in im_emb]
@@ -243,17 +248,17 @@ def next_image(embs, ys, calibrate_prompts):
             chosen_y = np.array([ys[i] for i in indices] + [0]*16)
             
             print(indices, chosen_y, '\n', len(chosen_y), len(feature_embs))
-
+            print('Gathering coefficients')
             lin_class = SVC(max_iter=50000, kernel='linear', class_weight='balanced').fit(feature_embs, chosen_y)
             coef_ = torch.tensor(lin_class.coef_, dtype=torch.double)
             coef_ = (coef_.flatten() / (coef_.flatten().norm())).unsqueeze(0)
-            coef_ = coef_
+            print('Gathered')
 
             rng_prompt = random.choice(prompt_list)
             w = 1.25# if len(embs) % 2 == 0 else 0
             im_emb = w * coef_.to(dtype=dtype)
 
-            prompt= '' if glob_idx % 2 == 0 else rng_prompt
+            prompt= 'high-quality video' if glob_idx % 2 == 0 else rng_prompt
             print(prompt)
             image, im_emb = generate(prompt, im_emb)
             embs += im_emb
@@ -354,8 +359,17 @@ document.body.addEventListener('click', function(event) {
       fadeInOut(target, '#cccccc');
     }
 });
+
 </script>
 '''
+
+#js = '''
+#document.body.addEventListener('loadeddata', (e) => {
+#  document.querySelector('[data-testid="Lightning-player"]').loop = true;
+#})
+
+#def replay(video):
+#    return video
 
 with gr.Blocks(css=css, head=js_head) as demo:
     gr.Markdown('''### Blue Tigers: Generative Recommenders for Exporation of Video.
@@ -371,16 +385,21 @@ with gr.Blocks(css=css, head=js_head) as demo:
     'an octopus writhes',
     'the moon is melting into my glass of tea',
     ])
+    def l():
+        return None
 
     with gr.Row(elem_id='output-image'):
         img = gr.Video(
-        label='Built from AnimateLCM',
+        label='Lightning',
         autoplay=True,
         interactive=False,
         height=512,
         width=512,
+        include_audio=False,
         elem_id="video_output"
        )
+        img.play(l, js='''document.querySelector('[data-testid="Lightning-player"]').loop = true''')
+    #img.end(replay, inputs=img, outputs=img)
     with gr.Row(equal_height=True):
         b3 = gr.Button(value='Dislike (A)', interactive=False, elem_id="dislike")
         b2 = gr.Button(value='Neither (Space)', interactive=False, elem_id="neither")
@@ -407,7 +426,10 @@ with gr.Blocks(css=css, head=js_head) as demo:
                  [b1, b2, b3, b4, img, embs, ys, calibrate_prompts])
     with gr.Row():
         html = gr.HTML('''<div style='text-align:center; font-size:20px'>You will calibrate for several prompts and then roam. </ div><br><br><br>
-<div style='text-align:center; font-size:14px'>Note that while the safety-check-filtered AnimateLCM model is unlikely to produce NSFW images, this may still occur, and users should avoid NSFW content when rating.
+<div style='text-align:center; font-size:14px'>Note that while the AnimateLCM model with NSFW filtering is unlikely to produce NSFW images, this may still occur, and users should avoid NSFW content when rating.
+</ div>
+<br><br>
+<div style='text-align:center; font-size:14px'>Thanks to @multimodalart for their contributions to the demo, esp. the interface and @maxbittker for feedback.
 </ div>''')
 
 demo.launch(share=True)
