@@ -337,8 +337,8 @@ document.body.addEventListener('click', function(event) {
 
 
 with gr.Blocks(css=css, head=js_head) as demo:
-    gr.Markdown('''### Blue Tigers: Generative Recommenders for Exporation of Video.
-    Explore the latent space without text prompts, based on your preferences. Learn more on [the write-up](https://rynmurdock.github.io/posts/2024/3/generative_recomenders/).
+    gr.Markdown('''### Blue Tigers: Generative Recommenders for Exporation of Video
+    Explore the latent space without text prompts based on your preferences. Learn more on [the write-up](https://rynmurdock.github.io/posts/2024/3/generative_recomenders/).
     ''', elem_id="description")
     embs = gr.State([])
     ys = gr.State([])
