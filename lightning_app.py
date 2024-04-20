@@ -1,5 +1,5 @@
 
-STEPS = 4
+STEPS = 6
 output_hidden_state = False
 
 from safety_checker_improved import maybe_nsfw
@@ -109,6 +109,7 @@ ckpt = f"animatediff_lightning_4step_diffusers.safetensors"
 pipe.unet.load_state_dict(load_file(hf_hub_download(repo, ckpt), device='cpu'), strict=False)
 
 
+
 pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15.bin", map_location='cpu')
 pipe.set_ip_adapter_scale(1.)
 pipe.unet.fuse_qkv_projections()
@@ -182,17 +183,28 @@ def next_image(embs, ys, calibrate_prompts):
             return image, embs, ys, calibrate_prompts
         else:
             print('######### Roaming #########')
+            
             # sample a .8 of rated embeddings for some stochasticity, or at least two embeddings.
-            n_to_choose = max(int((len(embs)*.8)), 2)
+            # could take a sample < len(embs)
+            n_to_choose = max(int((len(embs))), 2)
             indices = random.sample(range(len(embs)), n_to_choose)
             
             # sample only as many negatives as there are positives
-            pos_indices = [i for i in indices if ys[i] == 1]
-            neg_indices = [i for i in indices if ys[i] == 0]
-            lower = min(len(pos_indices), len(neg_indices))
-            neg_indices = random.sample(neg_indices, lower)
-            pos_indices = random.sample(pos_indices, lower)
-            indices = neg_indices + pos_indices
+            #pos_indices = [i for i in indices if ys[i] == 1]
+            #neg_indices = [i for i in indices if ys[i] == 0]
+            #lower = min(len(pos_indices), len(neg_indices))
+            #neg_indices = random.sample(neg_indices, lower)
+            #pos_indices = random.sample(pos_indices, lower)
+            #indices = neg_indices + pos_indices
+            
+            
+            pos_indices = [i for i in range(len(embs)) if ys[i] == 1]
+            neg_indices = [i for i in range(len(embs)) if ys[i] == 0]
+            if len(pos_indices) - len(neg_indices) > 10 and len(pos_indices) > 20:
+                pos_indices = pos_indices[21:]
+            elif len(neg_indices) - len(pos_indices) > 10 and len(neg_indices) > 20:
+                neg_indices = neg_indices[21:]
+            indices = pos_indices + neg_indices
             
             # also add the latest 0 and the latest 1
             has_0 = False
@@ -212,7 +224,7 @@ def next_image(embs, ys, calibrate_prompts):
             # let's take off a rating if so to continue without indexing errors.
             if len(ys) > len(embs):
                 print('ys are longer than embs; popping latest rating')
-                ys = ys[:-16]
+                ys.pop(-1)
             
             feature_embs = np.array(torch.cat([embs[i].to('cpu') for i in indices] + [leave_im_emb.to('cpu')]).to('cpu'))
             scaler = preprocessing.StandardScaler().fit(feature_embs)
@@ -223,21 +235,21 @@ def next_image(embs, ys, calibrate_prompts):
             print('Gathering coefficients')
             lin_class = SVC(max_iter=50000, kernel='linear', class_weight='balanced').fit(feature_embs, chosen_y)
             coef_ = torch.tensor(lin_class.coef_, dtype=torch.double)
-            coef_ = (coef_.flatten() / (coef_.flatten().norm())).unsqueeze(0)
+            coef_ = (coef_.flatten() / (coef_.flatten().norm()+.0001)).unsqueeze(0)
             print('Gathered')
 
             rng_prompt = random.choice(prompt_list)
-            w = 1.# if len(embs) % 2 == 0 else 0
+            w = 1# if len(embs) % 2 == 0 else 0
             im_emb = w * coef_.to(dtype=dtype)
 
-            prompt = 'a scene' if glob_idx % 2 == 0 else rng_prompt
+            prompt= 'the scene' if glob_idx % 2 == 0 else rng_prompt
             print(prompt)
             image, im_emb = generate(prompt, im_emb)
             embs += im_emb
             
-            #if len(embs) > 50:
-            #    embs = embs[:-16]
-            #    ys = ys[:-16]
+            if len(embs) > 1000:
+                embs = embs[16:]
+                ys = ys[16:]
             
             return image, embs, ys, calibrate_prompts
 
@@ -335,7 +347,6 @@ document.body.addEventListener('click', function(event) {
 </script>
 '''
 
-
 with gr.Blocks(css=css, head=js_head) as demo:
     gr.Markdown('''### Blue Tigers: Generative Recommenders for Exporation of Video
     Explore the latent space without text prompts based on your preferences. Learn more on [the write-up](https://rynmurdock.github.io/posts/2024/3/generative_recomenders/).
@@ -364,7 +375,6 @@ with gr.Blocks(css=css, head=js_head) as demo:
         elem_id="video_output"
        )
         img.play(l, js='''document.querySelector('[data-testid="Lightning-player"]').loop = true''')
-
     with gr.Row(equal_height=True):
         b3 = gr.Button(value='Dislike (A)', interactive=False, elem_id="dislike")
         b2 = gr.Button(value='Neither (Space)', interactive=False, elem_id="neither")

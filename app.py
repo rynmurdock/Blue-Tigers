@@ -183,8 +183,10 @@ def next_image(embs, ys, calibrate_prompts):
             return image, embs, ys, calibrate_prompts
         else:
             print('######### Roaming #########')
+            
             # sample a .8 of rated embeddings for some stochasticity, or at least two embeddings.
-            n_to_choose = max(int((len(embs)*.8)), 2)
+            # could take a sample < len(embs)
+            n_to_choose = max(int((len(embs))), 2)
             indices = random.sample(range(len(embs)), n_to_choose)
             
             # sample only as many negatives as there are positives
@@ -194,6 +196,15 @@ def next_image(embs, ys, calibrate_prompts):
             #neg_indices = random.sample(neg_indices, lower)
             #pos_indices = random.sample(pos_indices, lower)
             #indices = neg_indices + pos_indices
+            
+            
+            pos_indices = [i for i in range(len(embs)) if ys[i] == 1]
+            neg_indices = [i for i in range(len(embs)) if ys[i] == 0]
+            if len(pos_indices) - len(neg_indices) > 10 and len(pos_indices) > 20:
+                pos_indices = pos_indices[21:]
+            elif len(neg_indices) - len(pos_indices) > 10 and len(neg_indices) > 20:
+                neg_indices = neg_indices[21:]
+            indices = pos_indices + neg_indices
             
             # also add the latest 0 and the latest 1
             has_0 = False
@@ -224,21 +235,21 @@ def next_image(embs, ys, calibrate_prompts):
             print('Gathering coefficients')
             lin_class = SVC(max_iter=50000, kernel='linear', class_weight='balanced').fit(feature_embs, chosen_y)
             coef_ = torch.tensor(lin_class.coef_, dtype=torch.double)
-            coef_ = (coef_.flatten() / (coef_.flatten().norm())).unsqueeze(0)
+            coef_ = (coef_.flatten() / (coef_.flatten().norm()+.0001)).unsqueeze(0)
             print('Gathered')
 
             rng_prompt = random.choice(prompt_list)
-            w = 1.25# if len(embs) % 2 == 0 else 0
+            w = 1# if len(embs) % 2 == 0 else 0
             im_emb = w * coef_.to(dtype=dtype)
 
-            prompt= 'high-quality video' if glob_idx % 2 == 0 else rng_prompt
+            prompt= 'the scene' if glob_idx % 2 == 0 else rng_prompt
             print(prompt)
             image, im_emb = generate(prompt, im_emb)
             embs += im_emb
             
-            if len(embs) > 50:
-                embs.pop(0)
-                ys.pop(0)
+            if len(embs) > 1000:
+                embs = embs[16:]
+                ys = ys[16:]
             
             return image, embs, ys, calibrate_prompts
 
