@@ -187,12 +187,12 @@ def next_image(embs, ys, calibrate_prompts):
             indices = random.sample(range(len(embs)), n_to_choose)
             
             # sample only as many negatives as there are positives
-            #pos_indices = [i for i in indices if ys[i] == 1]
-            #neg_indices = [i for i in indices if ys[i] == 0]
-            #lower = min(len(pos_indices), len(neg_indices))
-            #neg_indices = random.sample(neg_indices, lower)
-            #pos_indices = random.sample(pos_indices, lower)
-            #indices = neg_indices + pos_indices
+            pos_indices = [i for i in indices if ys[i] == 1]
+            neg_indices = [i for i in indices if ys[i] == 0]
+            lower = min(len(pos_indices), len(neg_indices))
+            neg_indices = random.sample(neg_indices, lower)
+            pos_indices = random.sample(pos_indices, lower)
+            indices = neg_indices + pos_indices
             
             # also add the latest 0 and the latest 1
             has_0 = False
@@ -212,7 +212,7 @@ def next_image(embs, ys, calibrate_prompts):
             # let's take off a rating if so to continue without indexing errors.
             if len(ys) > len(embs):
                 print('ys are longer than embs; popping latest rating')
-                ys.pop(-1)
+                ys = ys[:-16]
             
             feature_embs = np.array(torch.cat([embs[i].to('cpu') for i in indices] + [leave_im_emb.to('cpu')]).to('cpu'))
             scaler = preprocessing.StandardScaler().fit(feature_embs)
@@ -227,17 +227,17 @@ def next_image(embs, ys, calibrate_prompts):
             print('Gathered')
 
             rng_prompt = random.choice(prompt_list)
-            w = 1.25# if len(embs) % 2 == 0 else 0
+            w = 1.# if len(embs) % 2 == 0 else 0
             im_emb = w * coef_.to(dtype=dtype)
 
-            prompt= 'high-quality video' if glob_idx % 2 == 0 else rng_prompt
+            prompt = 'a scene' if glob_idx % 2 == 0 else rng_prompt
             print(prompt)
             image, im_emb = generate(prompt, im_emb)
             embs += im_emb
             
-            if len(embs) > 50:
-                embs.pop(0)
-                ys.pop(0)
+            #if len(embs) > 50:
+            #    embs = embs[:-16]
+            #    ys = ys[:-16]
             
             return image, embs, ys, calibrate_prompts
 
