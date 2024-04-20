@@ -1,5 +1,5 @@
 
-STEPS = 6
+STEPS = 4
 output_hidden_state = False
 
 from safety_checker_improved import maybe_nsfw
@@ -164,13 +164,6 @@ glob_idx = 0
 def next_image(embs, ys, calibrate_prompts):
     global glob_idx
     glob_idx = glob_idx + 1
-
-    # handle case where every instance of calibration prompts is 'Neither' or 'Like' or 'Dislike'
-    if len(calibrate_prompts) == 0 and len(list(set(ys))) <= 1:
-        embs.append(.01*torch.randn(1, 1024))
-        embs.append(.01*torch.randn(1, 1024))
-        ys.append(0)
-        ys.append(1)
         
     with torch.no_grad():
         if len(calibrate_prompts) > 0:
@@ -186,8 +179,8 @@ def next_image(embs, ys, calibrate_prompts):
             
             # sample a .8 of rated embeddings for some stochasticity, or at least two embeddings.
             # could take a sample < len(embs)
-            n_to_choose = max(int((len(embs))), 2)
-            indices = random.sample(range(len(embs)), n_to_choose)
+            #n_to_choose = max(int((len(embs))), 2)
+            #indices = random.sample(range(len(embs)), n_to_choose)
             
             # sample only as many negatives as there are positives
             #pos_indices = [i for i in indices if ys[i] == 1]
@@ -197,19 +190,26 @@ def next_image(embs, ys, calibrate_prompts):
             #pos_indices = random.sample(pos_indices, lower)
             #indices = neg_indices + pos_indices
             
-            
             pos_indices = [i for i in range(len(embs)) if ys[i] == 1]
             neg_indices = [i for i in range(len(embs)) if ys[i] == 0]
-            if len(pos_indices) - len(neg_indices) > 10 and len(pos_indices) > 20:
-                pos_indices = pos_indices[21:]
-            elif len(neg_indices) - len(pos_indices) > 10 and len(neg_indices) > 20:
-                neg_indices = neg_indices[21:]
+            if len(pos_indices) - len(neg_indices) > 80 and len(pos_indices) > 180:
+                pos_indices = pos_indices[32:]
+            elif len(neg_indices) - len(pos_indices) > 80 and len(neg_indices) > 180:
+                neg_indices = neg_indices[32:]
             print(len(pos_indices), len(neg_indices))
             indices = pos_indices + neg_indices
             embs = [embs[i] for i in indices]
             ys = [ys[i] for i in indices]
-
             indices = list(range(len(embs)))
+            
+            
+            # handle case where every instance of calibration prompts is 'Neither' or 'Like' or 'Dislike'
+            if len(list(set(ys))) <= 1:
+                embs.append(.01*torch.randn(1, 1024))
+                embs.append(.01*torch.randn(1, 1024))
+                ys.append(0)
+                ys.append(1)
+
             
             # also add the latest 0 and the latest 1
             has_0 = False
