@@ -196,6 +196,9 @@ def next_image(embs, ys, calibrate_prompts):
                 pos_indices = pos_indices[32:]
             elif len(neg_indices) - len(pos_indices) > 80 and len(neg_indices) > 180:
                 neg_indices = neg_indices[32:]
+                if len(pos_indices) > 80:
+                    pos_indices = pos_indices[16:]
+                
             print(len(pos_indices), len(neg_indices))
             indices = pos_indices + neg_indices
             embs = [embs[i] for i in indices]
@@ -252,9 +255,9 @@ def next_image(embs, ys, calibrate_prompts):
             image, im_emb = generate(prompt, im_emb)
             embs += im_emb
             
-            if len(embs) > 1000:
-                embs = embs[16:]
-                ys = ys[16:]
+            #if len(embs) > 1000:
+            #    embs = embs[16:]
+            #    ys = ys[16:]
             
             return image, embs, ys, calibrate_prompts
 

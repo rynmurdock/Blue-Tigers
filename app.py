@@ -1,4 +1,8 @@
 
+import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('TkAgg')
+
 STEPS = 6
 output_hidden_state = False
 
@@ -22,6 +26,7 @@ import imageio
 import gradio as gr
 import numpy as np
 from sklearn.svm import SVC
+from sklearn.inspection import permutation_importance
 from sklearn import preprocessing
 import pandas as pd
 
@@ -192,12 +197,22 @@ def next_image(embs, ys, calibrate_prompts):
             
             pos_indices = [i for i in range(len(embs)) if ys[i] == 1]
             neg_indices = [i for i in range(len(embs)) if ys[i] == 0]
-            if len(pos_indices) - len(neg_indices) > 80 and len(pos_indices) > 180:
-                pos_indices = pos_indices[32:]
-            elif len(neg_indices) - len(pos_indices) > 80 and len(neg_indices) > 180:
+            
+            # the embs & ys stay tied by index but we shuffle to drop randomly
+            random.shuffle(pos_indices)
+            random.shuffle(neg_indices)
+            
+            #if len(pos_indices) - len(neg_indices) > 48 and len(pos_indices) > 80:
+            #    pos_indices = pos_indices[32:]
+            if len(neg_indices) - len(pos_indices) > 48 and len(pos_indices) > 80:
+                pos_indices = pos_indices[16:]
+            if len(neg_indices) - len(pos_indices) > 48 and len(neg_indices) > 80:
                 neg_indices = neg_indices[32:]
+            
+            
             print(len(pos_indices), len(neg_indices))
             indices = pos_indices + neg_indices
+            
             embs = [embs[i] for i in indices]
             ys = [ys[i] for i in indices]
             indices = list(range(len(embs)))
@@ -236,11 +251,15 @@ def next_image(embs, ys, calibrate_prompts):
             feature_embs = scaler.transform(feature_embs)
             chosen_y = np.array([ys[i] for i in indices] + [0]*16)
             
-            print(indices, chosen_y, '\n', len(chosen_y), len(feature_embs))
             print('Gathering coefficients')
             lin_class = SVC(max_iter=50000, kernel='linear', class_weight='balanced').fit(feature_embs, chosen_y)
             coef_ = torch.tensor(lin_class.coef_, dtype=torch.double)
-            coef_ = (coef_.flatten() / (coef_.flatten().norm()+.0001)).unsqueeze(0)
+            coef_ = coef_ / coef_.abs().max() * .25
+
+            plt.close('all')
+            plt.hist(np.array(coef_).flatten(), bins=5)
+            plt.savefig('plot.jpg')
+            print(coef_)
             print('Gathered')
 
             rng_prompt = random.choice(prompt_list)
@@ -252,7 +271,7 @@ def next_image(embs, ys, calibrate_prompts):
             image, im_emb = generate(prompt, im_emb)
             embs += im_emb
             
-            if len(embs) > 1000:
+            if len(embs) > 500:
                 embs = embs[16:]
                 ys = ys[16:]
             
@@ -359,12 +378,11 @@ with gr.Blocks(css=css, head=js_head) as demo:
     embs = gr.State([])
     ys = gr.State([])
     calibrate_prompts = gr.State([
-    'a still life featuring a glass of green tea.',
+    'the moon is melting into my glass of tea',
     'a sea slug -- pair of claws scuttling -- jelly fish glowing',
     'an adorable creature. It may be a goblin or a pig or a slug.',
     'an animation about a gorgeous nebula',
     'an octopus writhes',
-    'the moon is melting into my glass of tea',
     ])
     def l():
         return None
