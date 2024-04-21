@@ -157,6 +157,10 @@ def generate(prompt, in_im_embs=None, base='basem'):
         # TODO could return an automatic dislike of auto dislike on the backend for neither as well; just would need refactoring.
         return None, im_emb
     
+    plt.close('all')
+    plt.hist(np.array(im_emb.to('cpu')).flatten(), bins=5)
+    plt.savefig('real_im_emb_plot.jpg')
+    
     write_video(path, output.frames[0])
     return path, im_emb.to('cpu')
 
@@ -207,7 +211,7 @@ def next_image(embs, ys, calibrate_prompts):
             if len(neg_indices) - len(pos_indices) > 48/16 and len(pos_indices) > 120/16:
                 pos_indices = pos_indices[1:]
             if len(neg_indices) - len(pos_indices) > 48/16 and len(neg_indices) > 200/16:
-                neg_indices = neg_indices[32/16:]
+                neg_indices = neg_indices[2:]
             
             
             print(len(pos_indices), len(neg_indices))
@@ -245,7 +249,7 @@ def next_image(embs, ys, calibrate_prompts):
             if len(ys) > len(embs):
                 print('ys are longer than embs; popping latest rating')
                 ys.pop(-1)
-            print(embs, 'EMBS')
+            
             feature_embs = np.array(torch.stack([embs[i].to('cpu') for i in indices] + [leave_im_emb[0].to('cpu')]).to('cpu'))
             scaler = preprocessing.StandardScaler().fit(feature_embs)
             feature_embs = scaler.transform(feature_embs)
@@ -254,7 +258,7 @@ def next_image(embs, ys, calibrate_prompts):
             print('Gathering coefficients')
             lin_class = SVC(max_iter=50000, kernel='linear', class_weight='balanced').fit(feature_embs, chosen_y)
             coef_ = torch.tensor(lin_class.coef_, dtype=torch.double)
-            coef_ = coef_ / coef_.abs().max() * .25
+            coef_ = coef_ / coef_.abs().max() * 3
 
             plt.close('all')
             plt.hist(np.array(coef_).flatten(), bins=5)
@@ -271,7 +275,7 @@ def next_image(embs, ys, calibrate_prompts):
             image, im_emb = generate(prompt, im_emb)
             embs += im_emb
             
-            if len(embs) > 700:
+            if len(embs) > 700/16:
                 embs = embs[1:]
                 ys = ys[1:]
             
