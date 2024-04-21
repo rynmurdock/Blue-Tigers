@@ -3,6 +3,8 @@ import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use('TkAgg')
 
+from sklearn.linear_model import LinearRegression
+
 STEPS = 6
 output_hidden_state = False
 
@@ -138,7 +140,7 @@ def generate(prompt, in_im_embs=None, base='basem'):
         in_im_embs = torch.zeros(1, 1, 1, 1024, device=DEVICE, dtype=dtype)
         #in_im_embs = in_im_embs / torch.norm(in_im_embs)
     else:
-        in_im_embs = in_im_embs.unsqueeze(1).unsqueeze(1).to('cuda')
+        in_im_embs = in_im_embs.to('cuda').unsqueeze(0).unsqueeze(0)
         #im_embs = torch.cat((torch.zeros(1, 1024, device=DEVICE, dtype=dtype), in_im_embs), 0)
 
     output = pipe(prompt=prompt, guidance_scale=0, added_cond_kwargs={}, ip_adapter_image_embeds=[in_im_embs], num_inference_steps=STEPS)
@@ -256,9 +258,11 @@ def next_image(embs, ys, calibrate_prompts):
             chosen_y = np.array([ys[i] for i in indices] + [0])
             
             print('Gathering coefficients')
-            lin_class = SVC(max_iter=50000, kernel='linear', class_weight='balanced').fit(feature_embs, chosen_y)
+            #lin_class = LinearRegression(fit_intercept=False).fit(feature_embs, chosen_y)
+            lin_class = SVC(max_iter=50000, kernel='linear', class_weight='balanced', C=1).fit(feature_embs, chosen_y)
             coef_ = torch.tensor(lin_class.coef_, dtype=torch.double)
             coef_ = coef_ / coef_.abs().max() * 3
+            print(coef_.shape, 'COEF')
 
             plt.close('all')
             plt.hist(np.array(coef_).flatten(), bins=5)
