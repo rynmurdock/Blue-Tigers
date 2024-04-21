@@ -104,7 +104,7 @@ adapter = MotionAdapter.from_pretrained("wangfuyun/AnimateLCM")
 pipe = AnimateDiffPipeline.from_pretrained("emilianJR/epiCRealism", motion_adapter=adapter, image_encoder=image_encoder, torch_dtype=dtype)#, vae=vae)
 pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config, beta_schedule="linear")
 pipe.load_lora_weights("wangfuyun/AnimateLCM", weight_name="AnimateLCM_sd15_t2v_lora.safetensors", adapter_name="lcm-lora",)
-pipe.set_adapters(["lcm-lora"], [.8])
+pipe.set_adapters(["lcm-lora"], [1])
 pipe.fuse_lora()
 
 #pipe = AnimateDiffPipeline.from_pretrained('emilianJR/epiCRealism', torch_dtype=dtype, image_encoder=image_encoder)
@@ -116,7 +116,7 @@ pipe.fuse_lora()
 
 
 pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15.bin", map_location='cpu')
-pipe.set_ip_adapter_scale(1.)
+pipe.set_ip_adapter_scale(.8)
 pipe.unet.fuse_qkv_projections()
 pipe = compile(pipe, config=config)
 pipe.to(device=DEVICE)
@@ -124,7 +124,7 @@ pipe.to(device=DEVICE)
 im_embs = torch.zeros(1, 1, 1, 1024, device=DEVICE, dtype=dtype)
 output = pipe(prompt='a person', guidance_scale=0, added_cond_kwargs={}, ip_adapter_image_embeds=[im_embs], num_inference_steps=STEPS)
 leave_im_emb, _ = pipe.encode_image(
-                output.frames[0], DEVICE, 1, output_hidden_state
+                output.frames[0][len(output.frames[0])//2], DEVICE, 1, output_hidden_state
 )
 assert len(output.frames[0]) == 16
 leave_im_emb.to('cpu')
@@ -132,19 +132,19 @@ leave_im_emb.to('cpu')
 # Function 
 # TODO put back
 # @spaces.GPU()
-def generate(prompt, im_embs=None, base='basem'):
+def generate(prompt, in_im_embs=None, base='basem'):
 
-    if im_embs == None:
-        im_embs = torch.zeros(1, 1, 1, 1024, device=DEVICE, dtype=dtype)
-        #im_embs = im_embs / torch.norm(im_embs)
+    if in_im_embs == None:
+        in_im_embs = torch.zeros(1, 1, 1, 1024, device=DEVICE, dtype=dtype)
+        #in_im_embs = in_im_embs / torch.norm(in_im_embs)
     else:
-        im_embs = im_embs.unsqueeze(1).unsqueeze(1).to('cuda')
-        #im_embs = torch.cat((torch.zeros(1, 1024, device=DEVICE, dtype=dtype), im_embs), 0)
+        in_im_embs = in_im_embs.unsqueeze(1).unsqueeze(1).to('cuda')
+        #im_embs = torch.cat((torch.zeros(1, 1024, device=DEVICE, dtype=dtype), in_im_embs), 0)
 
-    output = pipe(prompt=prompt, guidance_scale=0, added_cond_kwargs={}, ip_adapter_image_embeds=[im_embs], num_inference_steps=STEPS)
+    output = pipe(prompt=prompt, guidance_scale=0, added_cond_kwargs={}, ip_adapter_image_embeds=[in_im_embs], num_inference_steps=STEPS)
 
     im_emb, _ = pipe.encode_image(
-                output.frames[0], DEVICE, 1, output_hidden_state
+                output.frames[0][len(output.frames[0])//2], DEVICE, 1, output_hidden_state
             )
 
     nsfw = maybe_nsfw(output.frames[0][len(output.frames[0])//2])
@@ -155,10 +155,10 @@ def generate(prompt, im_embs=None, base='basem'):
     if nsfw:
         gr.Warning("NSFW content detected.")
         # TODO could return an automatic dislike of auto dislike on the backend for neither as well; just would need refactoring.
-        return None, [imb.to('cpu').unsqueeze(0) for imb in im_emb]
+        return None, im_emb
     
     write_video(path, output.frames[0])
-    return path, [imb.to('cpu').unsqueeze(0) for imb in im_emb]
+    return path, im_emb.to('cpu')
 
 
 #######################
@@ -204,10 +204,10 @@ def next_image(embs, ys, calibrate_prompts):
             
             #if len(pos_indices) - len(neg_indices) > 48 and len(pos_indices) > 80:
             #    pos_indices = pos_indices[32:]
-            if len(neg_indices) - len(pos_indices) > 48 and len(pos_indices) > 80:
-                pos_indices = pos_indices[16:]
-            if len(neg_indices) - len(pos_indices) > 48 and len(neg_indices) > 80:
-                neg_indices = neg_indices[32:]
+            if len(neg_indices) - len(pos_indices) > 48/16 and len(pos_indices) > 120/16:
+                pos_indices = pos_indices[1:]
+            if len(neg_indices) - len(pos_indices) > 48/16 and len(neg_indices) > 200/16:
+                neg_indices = neg_indices[32/16:]
             
             
             print(len(pos_indices), len(neg_indices))
@@ -220,8 +220,8 @@ def next_image(embs, ys, calibrate_prompts):
             
             # handle case where every instance of calibration prompts is 'Neither' or 'Like' or 'Dislike'
             if len(list(set(ys))) <= 1:
-                embs.append(.01*torch.randn(1, 1024))
-                embs.append(.01*torch.randn(1, 1024))
+                embs.append(.01*torch.randn(1024))
+                embs.append(.01*torch.randn(1024))
                 ys.append(0)
                 ys.append(1)
 
@@ -245,11 +245,11 @@ def next_image(embs, ys, calibrate_prompts):
             if len(ys) > len(embs):
                 print('ys are longer than embs; popping latest rating')
                 ys.pop(-1)
-            
-            feature_embs = np.array(torch.cat([embs[i].to('cpu') for i in indices] + [leave_im_emb.to('cpu')]).to('cpu'))
+            print(embs, 'EMBS')
+            feature_embs = np.array(torch.stack([embs[i].to('cpu') for i in indices] + [leave_im_emb[0].to('cpu')]).to('cpu'))
             scaler = preprocessing.StandardScaler().fit(feature_embs)
             feature_embs = scaler.transform(feature_embs)
-            chosen_y = np.array([ys[i] for i in indices] + [0]*16)
+            chosen_y = np.array([ys[i] for i in indices] + [0])
             
             print('Gathering coefficients')
             lin_class = SVC(max_iter=50000, kernel='linear', class_weight='balanced').fit(feature_embs, chosen_y)
@@ -271,9 +271,9 @@ def next_image(embs, ys, calibrate_prompts):
             image, im_emb = generate(prompt, im_emb)
             embs += im_emb
             
-            if len(embs) > 500:
-                embs = embs[16:]
-                ys = ys[16:]
+            if len(embs) > 700:
+                embs = embs[1:]
+                ys = ys[1:]
             
             return image, embs, ys, calibrate_prompts
 
@@ -303,7 +303,7 @@ def choose(img, choice, embs, ys, calibrate_prompts):
     if choice == 'Like (L)':
         choice = 1
     elif choice == 'Neither (Space)':
-        embs = embs[:-16]
+        embs = embs[:-1]
         img, embs, ys, calibrate_prompts = next_image(embs, ys, calibrate_prompts)
         return img, embs, ys, calibrate_prompts
     else:
@@ -315,7 +315,7 @@ def choose(img, choice, embs, ys, calibrate_prompts):
         print('NSFW -- choice is disliked')
         choice = 0
     
-    ys += [choice]*16
+    ys += [choice]*1
     img, embs, ys, calibrate_prompts = next_image(embs, ys, calibrate_prompts)
     return img, embs, ys, calibrate_prompts
 
