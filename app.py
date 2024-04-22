@@ -1,16 +1,19 @@
 
+import torch
+
+# lol
+DEVICE = 'cuda'
+STEPS = 6
+output_hidden_state = False
+device = "cuda"
+dtype = torch.float16
+
 import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use('TkAgg')
 
 from sklearn.linear_model import LinearRegression
-
-STEPS = 6
-output_hidden_state = False
-
-from safety_checker_improved import maybe_nsfw
-
-from sfast.compilers.diffusion_pipeline_compiler import (compile,
+from sfast.compilers.diffusion_pipeline_compiler import (compile, compile_unet,
                                                          CompilationConfig)
 config = CompilationConfig.Default()
 
@@ -20,9 +23,11 @@ try:
 except ImportError:
     print('Triton not installed, skip')
 config.enable_cuda_graph = True
-
-
-DEVICE = 'cuda'
+config.enable_jit = True
+config.enable_jit_freeze = True
+config.enable_cnn_optimization = True
+config.preserve_parameters = False
+config.prefer_lowp_gemm = True
 
 import imageio
 import gradio as gr
@@ -32,16 +37,16 @@ from sklearn.inspection import permutation_importance
 from sklearn import preprocessing
 import pandas as pd
 
-from diffusers.models import ImageProjection
-import torch
-
 import random
 import time
-
-import torch
 from PIL import Image
+from safety_checker_improved import maybe_nsfw
 
+
+torch.backends.cuda.cufft_plan_cache[0].max_size = 0
+torch.set_grad_enabled(False)
 torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 
 # TODO put back?
 # import spaces
@@ -52,8 +57,7 @@ prompt_list = [p for p in list(set(
 start_time = time.time()
 
 ####################### Setup Model
-from diffusers import AnimateDiffPipeline, MotionAdapter, EulerDiscreteScheduler, AutoencoderTiny, LCMScheduler
-from diffusers.utils import export_to_video
+from diffusers import AnimateDiffPipeline, MotionAdapter, EulerDiscreteScheduler, LCMScheduler, ConsistencyDecoderVAE
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
 from PIL import Image
@@ -83,11 +87,6 @@ def write_video(file_name, images, fps=10):
     container.close()
     print('Saved')
 
-
-
-
-
-# Constants
 bases = {
     #"basem": "emilianJR/epiCRealism"
     #SG161222/Realistic_Vision_V6.0_B1_noVAE
@@ -96,14 +95,14 @@ bases = {
     #Lykon/dreamshaper-7
 }
 
-device = "cuda"
-dtype = torch.float16
 image_encoder = CLIPVisionModelWithProjection.from_pretrained("h94/IP-Adapter", subfolder="models/image_encoder", torch_dtype=dtype).to(DEVICE)
 # vae = AutoencoderTiny.from_pretrained("madebyollin/taesd", torch_dtype=dtype)
 
+# vae = ConsistencyDecoderVAE.from_pretrained("openai/consistency-decoder", torch_dtype=dtype)
+# vae = compile_unet(vae, config=config)
 
 adapter = MotionAdapter.from_pretrained("wangfuyun/AnimateLCM")
-pipe = AnimateDiffPipeline.from_pretrained("emilianJR/epiCRealism", motion_adapter=adapter, image_encoder=image_encoder, torch_dtype=dtype)#, vae=vae)
+pipe = AnimateDiffPipeline.from_pretrained("emilianJR/epiCRealism", motion_adapter=adapter, image_encoder=image_encoder, torch_dtype=dtype)
 pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config, beta_schedule="linear")
 pipe.load_lora_weights("wangfuyun/AnimateLCM", weight_name="AnimateLCM_sd15_t2v_lora.safetensors", adapter_name="lcm-lora",)
 pipe.set_adapters(["lcm-lora"], [1])
@@ -116,10 +115,11 @@ pipe.fuse_lora()
 #pipe.unet.load_state_dict(load_file(hf_hub_download(repo, ckpt), device='cpu'), strict=False)
 
 
-
 pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15.bin", map_location='cpu')
 pipe.set_ip_adapter_scale(.8)
 pipe.unet.fuse_qkv_projections()
+#pipe.enable_free_init(method="gaussian", use_fast_sampling=True)
+
 pipe = compile(pipe, config=config)
 pipe.to(device=DEVICE)
 
@@ -131,7 +131,7 @@ leave_im_emb, _ = pipe.encode_image(
 assert len(output.frames[0]) == 16
 leave_im_emb.to('cpu')
 
-# Function 
+
 # TODO put back
 # @spaces.GPU()
 def generate(prompt, in_im_embs=None, base='basem'):
