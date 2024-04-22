@@ -57,7 +57,7 @@ prompt_list = [p for p in list(set(
 start_time = time.time()
 
 ####################### Setup Model
-from diffusers import AnimateDiffPipeline, MotionAdapter, EulerDiscreteScheduler, LCMScheduler, ConsistencyDecoderVAE
+from diffusers import AnimateDiffPipeline, MotionAdapter, EulerDiscreteScheduler, LCMScheduler, AutoencoderTiny
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
 from PIL import Image
@@ -96,13 +96,13 @@ bases = {
 }
 
 image_encoder = CLIPVisionModelWithProjection.from_pretrained("h94/IP-Adapter", subfolder="models/image_encoder", torch_dtype=dtype).to(DEVICE)
-# vae = AutoencoderTiny.from_pretrained("madebyollin/taesd", torch_dtype=dtype)
+vae = AutoencoderTiny.from_pretrained("madebyollin/taesd", torch_dtype=dtype)
 
 # vae = ConsistencyDecoderVAE.from_pretrained("openai/consistency-decoder", torch_dtype=dtype)
 # vae = compile_unet(vae, config=config)
 
 adapter = MotionAdapter.from_pretrained("wangfuyun/AnimateLCM")
-pipe = AnimateDiffPipeline.from_pretrained("emilianJR/epiCRealism", motion_adapter=adapter, image_encoder=image_encoder, torch_dtype=dtype)
+pipe = AnimateDiffPipeline.from_pretrained("emilianJR/epiCRealism", motion_adapter=adapter, image_encoder=image_encoder, torch_dtype=dtype, vae=vae)
 pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config, beta_schedule="linear")
 pipe.load_lora_weights("wangfuyun/AnimateLCM", weight_name="AnimateLCM_sd15_t2v_lora.safetensors", adapter_name="lcm-lora",)
 pipe.set_adapters(["lcm-lora"], [1])

@@ -1,15 +1,19 @@
 
+# TODO required tensorflow==2.14 for me
 # weights from https://github.com/LAION-AI/safety-pipeline/tree/main
 from PIL import Image
 import tensorflow_hub as hub
 import tensorflow
 import numpy as np
-#import h5py
-import keras
 import sys
 sys.path.append('/home/ryn_mote/Misc/generative_recommender/gradio_video/automl/efficientnetv2/')
 import tensorflow as tf
+from tensorflow.keras import mixed_precision
+physical_devices = tf.config.list_physical_devices('GPU')
 
+tf.config.experimental.set_memory_growth(
+    physical_devices[0], True
+)
 # edited hparams to num_classes=5
 #model = effnetv2_model.EffNetV2Model('efficientnetv2-b2')
 model = tf.keras.models.load_model('nsfweffnetv2-b02-3epochs.h5',custom_objects={"KerasLayer":hub.KerasLayer})
