@@ -43,7 +43,6 @@ from PIL import Image
 from safety_checker_improved import maybe_nsfw
 
 
-torch.backends.cuda.cufft_plan_cache[0].max_size = 0
 torch.set_grad_enabled(False)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -65,11 +64,13 @@ from transformers import CLIPVisionModelWithProjection
 import uuid
 import av
 
-def write_video(file_name, images, fps=18):
+def write_video(file_name, images, fps=17):
     print('Saving')
     container = av.open(file_name, mode="w")
 
-    stream = container.add_stream("h264", rate=fps)
+    stream = container.add_stream("libx264", rate=fps)
+    stream.options = {'preset': 'ultrafast'}
+    stream.thread_count = 0
     stream.width = 512
     stream.height = 512
     stream.pix_fmt = "yuv420p"
@@ -382,8 +383,10 @@ document.body.addEventListener('click', function(event) {
 '''
 
 with gr.Blocks(css=css, head=js_head) as demo:
-    gr.Markdown('''### Blue Tigers: Generative Recommenders for Exporation of Video
-    Explore the latent space without text prompts based on your preferences. Learn more on [the write-up](https://rynmurdock.github.io/posts/2024/3/generative_recomenders/).
+    gr.Markdown('''# Blue Tigers
+### Generative Recommenders for Exporation of Video
+
+Explore the latent space without text prompts based on your preferences. Learn more on [the write-up](https://rynmurdock.github.io/posts/2024/3/generative_recomenders/).
     ''', elem_id="description")
     embs = gr.State([])
     ys = gr.State([])
@@ -392,7 +395,7 @@ with gr.Blocks(css=css, head=js_head) as demo:
     'a sea slug -- pair of claws scuttling -- jelly fish glowing',
     'an adorable creature. It may be a goblin or a pig or a slug.',
     'an animation about a gorgeous nebula',
-    'a sketch by da vinci'
+    'a sketch of an impressive mountain by da vinci',
     'an octopus writhes',
     ])
     def l():

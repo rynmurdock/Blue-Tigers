@@ -14,11 +14,10 @@ physical_devices = tf.config.list_physical_devices('GPU')
 tf.config.experimental.set_memory_growth(
     physical_devices[0], True
 )
-# edited hparams to num_classes=5
-#model = effnetv2_model.EffNetV2Model('efficientnetv2-b2')
+
 model = tf.keras.models.load_model('nsfweffnetv2-b02-3epochs.h5',custom_objects={"KerasLayer":hub.KerasLayer})
-# The image classifier had been trained on 682550 images from the 5 classes "Drawing" (39026), "Hentai" (28134), "Neutral" (369507), "Porn" (207969) & "Sexy" (37914).
-# ... we created a manually inspected test set that consists of 4900 samples, that contains images & their captions.
+# "The image classifier had been trained on 682550 images from the 5 classes "Drawing" (39026), "Hentai" (28134), "Neutral" (369507), "Porn" (207969) & "Sexy" (37914).
+# ... we created a manually inspected test set that consists of 4900 samples, that contains images & their captions."
 
 # Run prediction
 def maybe_nsfw(pil_image):
@@ -26,8 +25,9 @@ def maybe_nsfw(pil_image):
     imm = tensorflow.image.resize(np.array(pil_image)[:, :, :3], (260, 260))
     imm = (imm / 255)
     pred = model(tensorflow.expand_dims(imm, 0)).numpy()
-    print(tensorflow.math.softmax(pred[0]).numpy())
-    if all([i < .3 for i in tensorflow.math.softmax(pred[0]).numpy()[[1, 3, 4]]]):
+    probs = tensorflow.math.softmax(pred[0]).numpy()
+    print(probs)
+    if all([i < .3 for i in probs[[1, 3, 4]]]):
         return False
     return True
 
