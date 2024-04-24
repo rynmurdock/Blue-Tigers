@@ -65,7 +65,7 @@ from transformers import CLIPVisionModelWithProjection
 import uuid
 import av
 
-def write_video(file_name, images, fps=10):
+def write_video(file_name, images, fps=18):
     print('Saving')
     container = av.open(file_name, mode="w")
 
@@ -163,6 +163,8 @@ def generate(prompt, in_im_embs=None, base='basem'):
     plt.hist(np.array(im_emb.to('cpu')).flatten(), bins=5)
     plt.savefig('real_im_emb_plot.jpg')
     
+    output.frames[0] = output.frames[0] + list(reversed(output.frames[0]))
+
     write_video(path, output.frames[0])
     return path, im_emb.to('cpu')
 
@@ -210,10 +212,10 @@ def next_image(embs, ys, calibrate_prompts):
             
             #if len(pos_indices) - len(neg_indices) > 48 and len(pos_indices) > 80:
             #    pos_indices = pos_indices[32:]
-            if len(neg_indices) - len(pos_indices) > 48/16 and len(pos_indices) > 120/16:
-                pos_indices = pos_indices[1:]
-            if len(neg_indices) - len(pos_indices) > 48/16 and len(neg_indices) > 200/16:
-                neg_indices = neg_indices[2:]
+            if len(neg_indices) - len(pos_indices) > 48/16 and len(pos_indices) > 6:
+                pos_indices = pos_indices[5:]
+            if len(neg_indices) - len(pos_indices) > 48/16 and len(neg_indices) > 6:
+                neg_indices = neg_indices[5:]
             
             
             print(len(pos_indices), len(neg_indices))
@@ -259,7 +261,7 @@ def next_image(embs, ys, calibrate_prompts):
             
             print('Gathering coefficients')
             #lin_class = LinearRegression(fit_intercept=False).fit(feature_embs, chosen_y)
-            lin_class = SVC(max_iter=50000, kernel='linear', class_weight='balanced', C=1).fit(feature_embs, chosen_y)
+            lin_class = SVC(max_iter=50000, kernel='linear', class_weight='balanced', C=.1).fit(feature_embs, chosen_y)
             coef_ = torch.tensor(lin_class.coef_, dtype=torch.double)
             coef_ = coef_ / coef_.abs().max() * 3
             print(coef_.shape, 'COEF')
@@ -279,7 +281,7 @@ def next_image(embs, ys, calibrate_prompts):
             image, im_emb = generate(prompt, im_emb)
             embs += im_emb
             
-            if len(embs) > 700/16:
+            if len(embs) > 50:
                 embs = embs[1:]
                 ys = ys[1:]
             
@@ -390,6 +392,7 @@ with gr.Blocks(css=css, head=js_head) as demo:
     'a sea slug -- pair of claws scuttling -- jelly fish glowing',
     'an adorable creature. It may be a goblin or a pig or a slug.',
     'an animation about a gorgeous nebula',
+    'a sketch by da vinci'
     'an octopus writhes',
     ])
     def l():
