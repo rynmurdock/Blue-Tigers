@@ -218,12 +218,16 @@ def next_image(embs, ys, calibrate_prompts):
             if len(neg_indices) - len(pos_indices) > 48/16 and len(neg_indices) > 6:
                 neg_indices = neg_indices[5:]
             
+            if len(neg_indices) > 25:
+                neg_indices = neg_indices[1:]
             
             print(len(pos_indices), len(neg_indices))
             indices = pos_indices + neg_indices
             
             embs = [embs[i] for i in indices]
             ys = [ys[i] for i in indices]
+            
+            
             indices = list(range(len(embs)))
             
             
@@ -277,14 +281,11 @@ def next_image(embs, ys, calibrate_prompts):
             w = 1# if len(embs) % 2 == 0 else 0
             im_emb = w * coef_.to(dtype=dtype)
 
-            prompt= 'the scene' if glob_idx % 2 == 0 else rng_prompt
+            prompt= 'the scene' if glob_idx % 3 != 0 else rng_prompt
             print(prompt)
             image, im_emb = generate(prompt, im_emb)
             embs += im_emb
             
-            if len(embs) > 50:
-                embs = embs[1:]
-                ys = ys[1:]
             
             return image, embs, ys, calibrate_prompts
 
