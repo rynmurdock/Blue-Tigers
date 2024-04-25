@@ -67,7 +67,7 @@ def write_video(file_name, images, fps=17):
     print('Saving')
     container = av.open(file_name, mode="w")
 
-    stream = container.add_stream("libx264", rate=fps)
+    stream = container.add_stream("h264", rate=fps)
     # stream.options = {'preset': 'faster'}
     stream.thread_count = 0
     stream.width = 512
