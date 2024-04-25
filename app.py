@@ -43,8 +43,8 @@ from safety_checker_improved import maybe_nsfw
 
 
 torch.set_grad_enabled(False)
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
+#torch.backends.cuda.matmul.allow_tf32 = True
+#torch.backends.cudnn.allow_tf32 = True
 
 # TODO put back?
 # import spaces
