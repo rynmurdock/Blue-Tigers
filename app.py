@@ -10,7 +10,6 @@ dtype = torch.float16
 
 import matplotlib.pyplot as plt
 import matplotlib
-matplotlib.use('TkAgg')
 
 from sklearn.linear_model import LinearRegression
 from sfast.compilers.diffusion_pipeline_compiler import (compile, compile_unet,
@@ -204,6 +203,16 @@ def next_image(embs, ys, calibrate_prompts):
             #pos_indices = random.sample(pos_indices, lower)
             #indices = neg_indices + pos_indices
             
+            # handle case where every instance of calibration prompts is 'Neither' or 'Like' or 'Dislike'
+            if len(list(set(ys))) <= 1:
+                embs.append(.01*torch.randn(1024))
+                embs.append(.01*torch.randn(1024))
+                ys.append(0)
+                ys.append(1)
+            if len(list(ys)) < 10:
+                embs += [.01*torch.randn(1024)] * 3
+                ys += [0] * 3
+            
             pos_indices = [i for i in range(len(embs)) if ys[i] == 1]
             neg_indices = [i for i in range(len(embs)) if ys[i] == 0]
             
@@ -218,6 +227,7 @@ def next_image(embs, ys, calibrate_prompts):
             if len(neg_indices) - len(pos_indices) > 48/16 and len(neg_indices) > 6:
                 neg_indices = neg_indices[5:]
             
+            
             if len(neg_indices) > 25:
                 neg_indices = neg_indices[1:]
             
@@ -229,15 +239,6 @@ def next_image(embs, ys, calibrate_prompts):
             
             
             indices = list(range(len(embs)))
-            
-            
-            # handle case where every instance of calibration prompts is 'Neither' or 'Like' or 'Dislike'
-            if len(list(set(ys))) <= 1:
-                embs.append(.01*torch.randn(1024))
-                embs.append(.01*torch.randn(1024))
-                ys.append(0)
-                ys.append(1)
-
             
             # also add the latest 0 and the latest 1
             has_0 = False
@@ -397,7 +398,7 @@ Explore the latent space without text prompts based on your preferences. Learn m
     'an adorable creature. It may be a goblin or a pig or a slug.',
     'an animation about a gorgeous nebula',
     'a sketch of an impressive mountain by da vinci',
-    'an octopus writhes',
+    'a watercolor painting: the octopus writhes',
     ])
     def l():
         return None
