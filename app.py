@@ -116,7 +116,7 @@ pipe.fuse_lora()
 
 
 pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15.bin", map_location='cpu')
-pipe.set_ip_adapter_scale(.8)
+pipe.set_ip_adapter_scale(1.)
 pipe.unet.fuse_qkv_projections()
 #pipe.enable_free_init(method="gaussian", use_fast_sampling=True)
 
