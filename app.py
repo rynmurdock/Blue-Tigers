@@ -95,7 +95,7 @@ bases = {
     #Lykon/dreamshaper-7
 }
 
-image_encoder = CLIPVisionModelWithProjection.from_pretrained("h94/IP-Adapter", subfolder="models/image_encoder", torch_dtype=dtype).to(DEVICE)
+image_encoder = CLIPVisionModelWithProjection.from_pretrained("h94/IP-Adapter", subfolder="sdxl_models/image_encoder", torch_dtype=dtype).to(DEVICE)
 vae = AutoencoderTiny.from_pretrained("madebyollin/taesd", torch_dtype=dtype)
 
 # vae = ConsistencyDecoderVAE.from_pretrained("openai/consistency-decoder", torch_dtype=dtype)
@@ -115,15 +115,15 @@ pipe.fuse_lora()
 #pipe.unet.load_state_dict(load_file(hf_hub_download(repo, ckpt), device='cpu'), strict=False)
 
 
-pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15.bin", map_location='cpu')
-pipe.set_ip_adapter_scale(1.)
+pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15_vit-G.bin", map_location='cpu')
+pipe.set_ip_adapter_scale(.8)
 pipe.unet.fuse_qkv_projections()
 #pipe.enable_free_init(method="gaussian", use_fast_sampling=True)
 
 pipe = compile(pipe, config=config)
 pipe.to(device=DEVICE)
 
-im_embs = torch.zeros(1, 1, 1, 1024, device=DEVICE, dtype=dtype)
+im_embs = torch.zeros(1, 1, 1, 1280, device=DEVICE, dtype=dtype)
 output = pipe(prompt='a person', guidance_scale=0, added_cond_kwargs={}, ip_adapter_image_embeds=[im_embs], num_inference_steps=STEPS)
 leave_im_emb, _ = pipe.encode_image(
                 output.frames[0][len(output.frames[0])//2], DEVICE, 1, output_hidden_state
@@ -137,11 +137,12 @@ leave_im_emb.to('cpu')
 def generate(prompt, in_im_embs=None, base='basem'):
 
     if in_im_embs == None:
-        in_im_embs = torch.zeros(1, 1, 1, 1024, device=DEVICE, dtype=dtype)
+        #in_im_embs = torch.zeros(1, 1, 1, 1280, device=DEVICE, dtype=dtype)
+        in_im_embs= torch.load('/home/ryn_mote/Misc/generative_recommender/gradio_video/1708230329.2274947.pt').to('cuda').unsqueeze(0).unsqueeze(0).to(dtype)
         #in_im_embs = in_im_embs / torch.norm(in_im_embs)
     else:
         in_im_embs = in_im_embs.to('cuda').unsqueeze(0).unsqueeze(0)
-        #im_embs = torch.cat((torch.zeros(1, 1024, device=DEVICE, dtype=dtype), in_im_embs), 0)
+        #im_embs = torch.cat((torch.zeros(1, 1280, device=DEVICE, dtype=dtype), in_im_embs), 0)
 
     output = pipe(prompt=prompt, guidance_scale=0, added_cond_kwargs={}, ip_adapter_image_embeds=[in_im_embs], num_inference_steps=STEPS)
 
@@ -205,12 +206,12 @@ def next_image(embs, ys, calibrate_prompts):
             
             # handle case where every instance of calibration prompts is 'Neither' or 'Like' or 'Dislike'
             if len(list(set(ys))) <= 1:
-                embs.append(.01*torch.randn(1024))
-                embs.append(.01*torch.randn(1024))
+                embs.append(.01*torch.randn(1280))
+                embs.append(.01*torch.randn(1280))
                 ys.append(0)
                 ys.append(1)
             if len(list(ys)) < 10:
-                embs += [.01*torch.randn(1024)] * 3
+                embs += [.01*torch.randn(1280)] * 3
                 ys += [0] * 3
             
             pos_indices = [i for i in range(len(embs)) if ys[i] == 1]
