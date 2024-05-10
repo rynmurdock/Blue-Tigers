@@ -113,7 +113,7 @@ adapter = MotionAdapter.from_pretrained("wangfuyun/AnimateLCM")
 pipe = AnimateDiffPipeline.from_pretrained("runwayml/stable-diffusion-v1-5", motion_adapter=adapter, image_encoder=image_encoder, torch_dtype=dtype, unet=unet, text_encoder=text_encoder)
 pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config, beta_schedule="linear")
 pipe.load_lora_weights("wangfuyun/AnimateLCM", weight_name="AnimateLCM_sd15_t2v_lora.safetensors", adapter_name="lcm-lora",)
-pipe.set_adapters(["lcm-lora"], [.8])
+pipe.set_adapters(["lcm-lora"], [.75])
 pipe.fuse_lora()
 
 #pipe = AnimateDiffPipeline.from_pretrained('emilianJR/epiCRealism', torch_dtype=dtype, image_encoder=image_encoder)
@@ -206,14 +206,6 @@ def next_image(embs, ys, calibrate_prompts):
             #n_to_choose = max(int((len(embs))), 2)
             #indices = random.sample(range(len(embs)), n_to_choose)
             
-            # sample only as many negatives as there are positives
-            #pos_indices = [i for i in indices if ys[i] == 1]
-            #neg_indices = [i for i in indices if ys[i] == 0]
-            #lower = min(len(pos_indices), len(neg_indices))
-            #neg_indices = random.sample(neg_indices, lower)
-            #pos_indices = random.sample(pos_indices, lower)
-            #indices = neg_indices + pos_indices
-            
             # handle case where every instance of calibration prompts is 'Neither' or 'Like' or 'Dislike'
             if len(list(set(ys))) <= 1:
                 embs.append(.01*torch.randn(1280))
@@ -224,32 +216,17 @@ def next_image(embs, ys, calibrate_prompts):
                 embs += [.01*torch.randn(1280)] * 3
                 ys += [-1] * 3
             
-            pos_indices = [i for i in range(len(embs)) if ys[i] == 1]
-            neg_indices = [i for i in range(len(embs)) if ys[i] == 0]
-            
-            # the embs & ys stay tied by index but we shuffle to drop randomly
-            random.shuffle(pos_indices)
-            random.shuffle(neg_indices)
-            
-            #if len(pos_indices) - len(neg_indices) > 48 and len(pos_indices) > 80:
-            #    pos_indices = pos_indices[32:]
-            #if len(neg_indices) - len(pos_indices) > 48/16 and len(pos_indices) > 6:
-            #    pos_indices = pos_indices[5:]
-            #if len(neg_indices) - len(pos_indices) > 48/16 and len(neg_indices) > 6:
-            #    neg_indices = neg_indices[5:]
+            indices = range(len(embs))            
+            # sample only as many negatives as there are positives
+            pos_indices = [i for i in indices if ys[i] == 1]
+            neg_indices = [i for i in indices if ys[i] == 0]
+            lower = min(len(pos_indices), len(neg_indices))
+            neg_indices = random.sample(neg_indices, lower)
+            pos_indices = random.sample(pos_indices, lower)
+            indices = neg_indices + pos_indices
+            print(len(neg_indices), len(pos_indices))
             
             
-            #if len(neg_indices) > 30:
-            #    neg_indices = neg_indices[1:]
-            
-            print(len(pos_indices), len(neg_indices))
-            indices = pos_indices + neg_indices
-            
-            embs = [embs[i] for i in indices]
-            ys = [ys[i] for i in indices]
-            
-            
-            indices = list(range(len(embs)))
             
             # also add the latest 0 and the latest 1
             has_0 = False
