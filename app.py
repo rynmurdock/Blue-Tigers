@@ -11,7 +11,7 @@ dtype = torch.float16
 import matplotlib.pyplot as plt
 import matplotlib
 
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import Ridge
 from sfast.compilers.diffusion_pipeline_compiler import (compile, compile_unet,
                                                          CompilationConfig)
 config = CompilationConfig.Default()
@@ -43,11 +43,10 @@ from safety_checker_improved import maybe_nsfw
 
 
 torch.set_grad_enabled(False)
-#torch.backends.cuda.matmul.allow_tf32 = True
-#torch.backends.cudnn.allow_tf32 = True
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 
-# TODO put back?
-# import spaces
+import spaces
 
 prompt_list = [p for p in list(set(
                 pd.read_csv('./twitter_prompts.csv').iloc[:, 1].tolist())) if type(p) == str]
@@ -55,7 +54,8 @@ prompt_list = [p for p in list(set(
 start_time = time.time()
 
 ####################### Setup Model
-from diffusers import AnimateDiffPipeline, MotionAdapter, EulerDiscreteScheduler, LCMScheduler, AutoencoderTiny
+from diffusers import AnimateDiffPipeline, MotionAdapter, EulerDiscreteScheduler, LCMScheduler, AutoencoderTiny, UNet2DConditionModel, AutoencoderKL
+from transformers import CLIPTextModel
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
 from PIL import Image
@@ -96,32 +96,43 @@ bases = {
 }
 
 image_encoder = CLIPVisionModelWithProjection.from_pretrained("h94/IP-Adapter", subfolder="sdxl_models/image_encoder", torch_dtype=dtype).to(DEVICE)
-vae = AutoencoderTiny.from_pretrained("madebyollin/taesd", torch_dtype=dtype)
+#vae = AutoencoderTiny.from_pretrained("madebyollin/taesd", torch_dtype=dtype)
 
 # vae = ConsistencyDecoderVAE.from_pretrained("openai/consistency-decoder", torch_dtype=dtype)
 # vae = compile_unet(vae, config=config)
 
+#finetune_path = '''/home/ryn_mote/Misc/finetune-sd1.5/dreambooth-model best'''''
+#unet = UNet2DConditionModel.from_pretrained(finetune_path+'/unet/').to(dtype)
+#text_encoder = CLIPTextModel.from_pretrained(finetune_path+'/text_encoder/').to(dtype)
+
+
+unet = UNet2DConditionModel.from_pretrained('rynmurdock/Sea_Claws', subfolder='unet').to(dtype)
+text_encoder = CLIPTextModel.from_pretrained('rynmurdock/Sea_Claws', subfolder='text_encoder').to(dtype)
+
 adapter = MotionAdapter.from_pretrained("wangfuyun/AnimateLCM")
-pipe = AnimateDiffPipeline.from_pretrained("emilianJR/epiCRealism", motion_adapter=adapter, image_encoder=image_encoder, torch_dtype=dtype, vae=vae)
+pipe = AnimateDiffPipeline.from_pretrained("runwayml/stable-diffusion-v1-5", motion_adapter=adapter, image_encoder=image_encoder, torch_dtype=dtype, unet=unet, text_encoder=text_encoder)
 pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config, beta_schedule="linear")
 pipe.load_lora_weights("wangfuyun/AnimateLCM", weight_name="AnimateLCM_sd15_t2v_lora.safetensors", adapter_name="lcm-lora",)
-pipe.set_adapters(["lcm-lora"], [1])
+pipe.set_adapters(["lcm-lora"], [.8])
 pipe.fuse_lora()
 
 #pipe = AnimateDiffPipeline.from_pretrained('emilianJR/epiCRealism', torch_dtype=dtype, image_encoder=image_encoder)
 #pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing", beta_schedule="linear")
 #repo = "ByteDance/AnimateDiff-Lightning"
 #ckpt = f"animatediff_lightning_4step_diffusers.safetensors"
-#pipe.unet.load_state_dict(load_file(hf_hub_download(repo, ckpt), device='cpu'), strict=False)
 
 
 pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15_vit-G.bin", map_location='cpu')
-pipe.set_ip_adapter_scale(.8)
+# This IP adapter improves outputs substantially.
+pipe.set_ip_adapter_scale(.6)
 pipe.unet.fuse_qkv_projections()
 #pipe.enable_free_init(method="gaussian", use_fast_sampling=True)
 
-pipe = compile(pipe, config=config)
+#pipe = compile(pipe, config=config)
 pipe.to(device=DEVICE)
+#pipe.unet = torch.compile(pipe.unet)
+#pipe.vae = torch.compile(pipe.vae)
+
 
 im_embs = torch.zeros(1, 1, 1, 1280, device=DEVICE, dtype=dtype)
 output = pipe(prompt='a person', guidance_scale=0, added_cond_kwargs={}, ip_adapter_image_embeds=[im_embs], num_inference_steps=STEPS)
@@ -132,14 +143,13 @@ assert len(output.frames[0]) == 16
 leave_im_emb.to('cpu')
 
 
-# TODO put back
-# @spaces.GPU()
+@spaces.GPU()
 def generate(prompt, in_im_embs=None, base='basem'):
 
     if in_im_embs == None:
-        #in_im_embs = torch.zeros(1, 1, 1, 1280, device=DEVICE, dtype=dtype)
-        in_im_embs= torch.load('/home/ryn_mote/Misc/generative_recommender/gradio_video/1708230329.2274947.pt').to('cuda').unsqueeze(0).unsqueeze(0).to(dtype)
-        #in_im_embs = in_im_embs / torch.norm(in_im_embs)
+        #in_im_embs = torch.randn(1, 1, 1, 1280, device=DEVICE, dtype=dtype)
+        in_im_embs= torch.load('1708230329.2274947.pt').to('cuda').unsqueeze(0).unsqueeze(0).to(dtype)
+        in_im_embs = in_im_embs / in_im_embs.norm()
     else:
         in_im_embs = in_im_embs.to('cuda').unsqueeze(0).unsqueeze(0)
         #im_embs = torch.cat((torch.zeros(1, 1280, device=DEVICE, dtype=dtype), in_im_embs), 0)
@@ -208,11 +218,11 @@ def next_image(embs, ys, calibrate_prompts):
             if len(list(set(ys))) <= 1:
                 embs.append(.01*torch.randn(1280))
                 embs.append(.01*torch.randn(1280))
-                ys.append(0)
+                ys.append(-1)
                 ys.append(1)
             if len(list(ys)) < 10:
                 embs += [.01*torch.randn(1280)] * 3
-                ys += [0] * 3
+                ys += [-1] * 3
             
             pos_indices = [i for i in range(len(embs)) if ys[i] == 1]
             neg_indices = [i for i in range(len(embs)) if ys[i] == 0]
@@ -223,14 +233,14 @@ def next_image(embs, ys, calibrate_prompts):
             
             #if len(pos_indices) - len(neg_indices) > 48 and len(pos_indices) > 80:
             #    pos_indices = pos_indices[32:]
-            if len(neg_indices) - len(pos_indices) > 48/16 and len(pos_indices) > 6:
-                pos_indices = pos_indices[5:]
-            if len(neg_indices) - len(pos_indices) > 48/16 and len(neg_indices) > 6:
-                neg_indices = neg_indices[5:]
+            #if len(neg_indices) - len(pos_indices) > 48/16 and len(pos_indices) > 6:
+            #    pos_indices = pos_indices[5:]
+            #if len(neg_indices) - len(pos_indices) > 48/16 and len(neg_indices) > 6:
+            #    neg_indices = neg_indices[5:]
             
             
-            if len(neg_indices) > 25:
-                neg_indices = neg_indices[1:]
+            #if len(neg_indices) > 30:
+            #    neg_indices = neg_indices[1:]
             
             print(len(pos_indices), len(neg_indices))
             indices = pos_indices + neg_indices
@@ -262,14 +272,14 @@ def next_image(embs, ys, calibrate_prompts):
                 ys.pop(-1)
             
             feature_embs = np.array(torch.stack([embs[i].to('cpu') for i in indices] + [leave_im_emb[0].to('cpu')]).to('cpu'))
-            scaler = preprocessing.StandardScaler().fit(feature_embs)
-            feature_embs = scaler.transform(feature_embs)
+            #scaler = preprocessing.StandardScaler().fit(feature_embs)
+            #feature_embs = scaler.transform(feature_embs)
             chosen_y = np.array([ys[i] for i in indices] + [0])
             
             print('Gathering coefficients')
-            #lin_class = LinearRegression(fit_intercept=False).fit(feature_embs, chosen_y)
-            lin_class = SVC(max_iter=50000, kernel='linear', class_weight='balanced', C=.1).fit(feature_embs, chosen_y)
-            coef_ = torch.tensor(lin_class.coef_, dtype=torch.double)
+            lin_class = Ridge(fit_intercept=False).fit(feature_embs, chosen_y)
+            #lin_class = SVC(max_iter=50000, kernel='linear', C=.1, class_weight='balanced').fit(feature_embs, chosen_y)
+            coef_ = torch.tensor(lin_class.coef_, dtype=torch.double).unsqueeze(0)
             coef_ = coef_ / coef_.abs().max() * 3
             print(coef_.shape, 'COEF')
 
@@ -283,7 +293,7 @@ def next_image(embs, ys, calibrate_prompts):
             w = 1# if len(embs) % 2 == 0 else 0
             im_emb = w * coef_.to(dtype=dtype)
 
-            prompt= 'the scene' if glob_idx % 3 != 0 else rng_prompt
+            prompt= '' if glob_idx % 3 != 0 else rng_prompt
             print(prompt)
             image, im_emb = generate(prompt, im_emb)
             embs += im_emb
@@ -395,7 +405,7 @@ Explore the latent space without text prompts based on your preferences. Learn m
     ys = gr.State([])
     calibrate_prompts = gr.State([
     'the moon is melting into my glass of tea',
-    'a sea slug -- pair of claws scuttling -- jelly fish glowing',
+    'a sea slug -- pair of claws scuttling -- jelly fish floats',
     'an adorable creature. It may be a goblin or a pig or a slug.',
     'an animation about a gorgeous nebula',
     'a sketch of an impressive mountain by da vinci',
