@@ -101,7 +101,7 @@ image_encoder = CLIPVisionModelWithProjection.from_pretrained("h94/IP-Adapter", 
 # vae = ConsistencyDecoderVAE.from_pretrained("openai/consistency-decoder", torch_dtype=dtype)
 # vae = compile_unet(vae, config=config)
 
-#finetune_path = '''/home/ryn_mote/Misc/finetune-sd1.5/yes dreambooth-model/'''''
+#finetune_path = '''/home/ryn_mote/Misc/finetune-sd1.5/dreambooth-model best'''''
 #unet = UNet2DConditionModel.from_pretrained(finetune_path+'/unet/').to(dtype)
 #text_encoder = CLIPTextModel.from_pretrained(finetune_path+'/text_encoder/').to(dtype)
 
@@ -124,7 +124,7 @@ pipe.fuse_lora()
 
 pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15_vit-G.bin", map_location='cpu')
 # This IP adapter improves outputs substantially.
-pipe.set_ip_adapter_scale(.6)
+pipe.set_ip_adapter_scale(.8)
 pipe.unet.fuse_qkv_projections()
 #pipe.enable_free_init(method="gaussian", use_fast_sampling=True)
 
@@ -210,24 +210,22 @@ def next_image(embs, ys, calibrate_prompts):
             if len(list(set(ys))) <= 1:
                 embs.append(.01*torch.randn(1280))
                 embs.append(.01*torch.randn(1280))
-                ys.append(-1)
+                ys.append(0)
                 ys.append(1)
             #if len(list(ys)) < 10:
             #    embs += [.01*torch.randn(1280)] * 3
             #    ys += [-1] * 3
             
-            indices = range(len(embs))            
+            indices = list(range(len(embs)))
             # sample only as many negatives as there are positives
             pos_indices = [i for i in indices if ys[i] == 1]
-            neg_indices = [i for i in indices if ys[i] == -1]
+            neg_indices = [i for i in indices if ys[i] == 0]
             #lower = min(len(pos_indices), len(neg_indices))
             #neg_indices = random.sample(neg_indices, lower)
             #pos_indices = random.sample(pos_indices, lower)
-            #indices = neg_indices + pos_indices
             print(len(neg_indices), len(pos_indices))
             
             
-                    
             # we may have just encountered a rare multi-threading diffusers issue (https://github.com/huggingface/diffusers/issues/5749);
             # this ends up adding a rating but losing an embedding, it seems.
             # let's take off a rating if so to continue without indexing errors.
@@ -238,12 +236,12 @@ def next_image(embs, ys, calibrate_prompts):
             feature_embs = np.array(torch.stack([embs[i].to('cpu') for i in indices] + [leave_im_emb[0].to('cpu')]).to('cpu'))
             #scaler = preprocessing.StandardScaler().fit(feature_embs)
             #feature_embs = scaler.transform(feature_embs)
-            chosen_y = np.array([ys[i] for i in indices] + [-1])
+            chosen_y = np.array([ys[i] for i in indices] + [0])
             
             print('Gathering coefficients')
             #lin_class = Ridge(fit_intercept=False).fit(feature_embs, chosen_y)
             lin_class = SVC(max_iter=50000, kernel='linear', C=.1, class_weight='balanced').fit(feature_embs, chosen_y)
-            coef_ = torch.tensor(lin_class.coef_, dtype=torch.double).unsqueeze(0)
+            coef_ = torch.tensor(lin_class.coef_, dtype=torch.double)
             coef_ = coef_ / coef_.abs().max() * 3
             print(coef_.shape, 'COEF')
 
@@ -295,13 +293,13 @@ def choose(img, choice, embs, ys, calibrate_prompts):
         img, embs, ys, calibrate_prompts = next_image(embs, ys, calibrate_prompts)
         return img, embs, ys, calibrate_prompts
     else:
-        choice = -1
+        choice = 0
 
     # if we detected NSFW, leave that area of latent space regardless of how they rated chosen.
     # TODO skip allowing rating
     if img == None:
         print('NSFW -- choice is disliked')
-        choice = -1
+        choice = 0
     
     ys += [choice]*1
     img, embs, ys, calibrate_prompts = next_image(embs, ys, calibrate_prompts)
@@ -369,7 +367,6 @@ Explore the latent space without text prompts based on your preferences. Learn m
     ys = gr.State([])
     calibrate_prompts = gr.State([
     'the moon is melting into my glass of tea',
-    'The city is made of wires, lightning, and science fiction.',
     'a sea slug -- pair of claws scuttling -- jelly fish floats',
     'an adorable creature. It may be a goblin or a pig or a slug.',
     'an animation about a gorgeous nebula',
