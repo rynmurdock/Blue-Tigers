@@ -101,19 +101,19 @@ image_encoder = CLIPVisionModelWithProjection.from_pretrained("h94/IP-Adapter", 
 # vae = ConsistencyDecoderVAE.from_pretrained("openai/consistency-decoder", torch_dtype=dtype)
 # vae = compile_unet(vae, config=config)
 
-#finetune_path = '''/home/ryn_mote/Misc/finetune-sd1.5/dreambooth-model best'''''
-#unet = UNet2DConditionModel.from_pretrained(finetune_path+'/unet/').to(dtype)
-#text_encoder = CLIPTextModel.from_pretrained(finetune_path+'/text_encoder/').to(dtype)
+finetune_path = '''/home/ryn_mote/Misc/finetune-sd1.5/yes dreambooth-model/'''''
+unet = UNet2DConditionModel.from_pretrained(finetune_path+'/unet/').to(dtype)
+text_encoder = CLIPTextModel.from_pretrained(finetune_path+'/text_encoder/').to(dtype)
 
 
-unet = UNet2DConditionModel.from_pretrained('rynmurdock/Sea_Claws', subfolder='unet').to(dtype)
-text_encoder = CLIPTextModel.from_pretrained('rynmurdock/Sea_Claws', subfolder='text_encoder').to(dtype)
+#unet = UNet2DConditionModel.from_pretrained('rynmurdock/Sea_Claws', subfolder='unet').to(dtype)
+#text_encoder = CLIPTextModel.from_pretrained('rynmurdock/Sea_Claws', subfolder='text_encoder').to(dtype)
 
 adapter = MotionAdapter.from_pretrained("wangfuyun/AnimateLCM")
 pipe = AnimateDiffPipeline.from_pretrained("runwayml/stable-diffusion-v1-5", motion_adapter=adapter, image_encoder=image_encoder, torch_dtype=dtype, unet=unet, text_encoder=text_encoder)
 pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config, beta_schedule="linear")
 pipe.load_lora_weights("wangfuyun/AnimateLCM", weight_name="AnimateLCM_sd15_t2v_lora.safetensors", adapter_name="lcm-lora",)
-pipe.set_adapters(["lcm-lora"], [.75])
+pipe.set_adapters(["lcm-lora"], [.9])
 pipe.fuse_lora()
 
 #pipe = AnimateDiffPipeline.from_pretrained('emilianJR/epiCRealism', torch_dtype=dtype, image_encoder=image_encoder)
@@ -227,19 +227,6 @@ def next_image(embs, ys, calibrate_prompts):
             print(len(neg_indices), len(pos_indices))
             
             
-            
-            # also add the latest 0 and the latest 1
-            has_0 = False
-            has_1 = False
-            for i in reversed(range(len(ys))):
-                if ys[i] == 0 and has_0 == False:
-                    indices.append(i)
-                    has_0 = True
-                elif ys[i] == 1 and has_1 == False:
-                    indices.append(i)
-                    has_1 = True
-                if has_0 and has_1:
-                    break
                     
             # we may have just encountered a rare multi-threading diffusers issue (https://github.com/huggingface/diffusers/issues/5749);
             # this ends up adding a rating but losing an embedding, it seems.
