@@ -101,13 +101,13 @@ image_encoder = CLIPVisionModelWithProjection.from_pretrained("h94/IP-Adapter", 
 # vae = ConsistencyDecoderVAE.from_pretrained("openai/consistency-decoder", torch_dtype=dtype)
 # vae = compile_unet(vae, config=config)
 
-finetune_path = '''/home/ryn_mote/Misc/finetune-sd1.5/yes dreambooth-model/'''''
-unet = UNet2DConditionModel.from_pretrained(finetune_path+'/unet/').to(dtype)
-text_encoder = CLIPTextModel.from_pretrained(finetune_path+'/text_encoder/').to(dtype)
+#finetune_path = '''/home/ryn_mote/Misc/finetune-sd1.5/yes dreambooth-model/'''''
+#unet = UNet2DConditionModel.from_pretrained(finetune_path+'/unet/').to(dtype)
+#text_encoder = CLIPTextModel.from_pretrained(finetune_path+'/text_encoder/').to(dtype)
 
 
-#unet = UNet2DConditionModel.from_pretrained('rynmurdock/Sea_Claws', subfolder='unet').to(dtype)
-#text_encoder = CLIPTextModel.from_pretrained('rynmurdock/Sea_Claws', subfolder='text_encoder').to(dtype)
+unet = UNet2DConditionModel.from_pretrained('rynmurdock/Sea_Claws', subfolder='unet').to(dtype)
+text_encoder = CLIPTextModel.from_pretrained('rynmurdock/Sea_Claws', subfolder='text_encoder').to(dtype)
 
 adapter = MotionAdapter.from_pretrained("wangfuyun/AnimateLCM")
 pipe = AnimateDiffPipeline.from_pretrained("runwayml/stable-diffusion-v1-5", motion_adapter=adapter, image_encoder=image_encoder, torch_dtype=dtype, unet=unet, text_encoder=text_encoder)
@@ -369,6 +369,7 @@ Explore the latent space without text prompts based on your preferences. Learn m
     ys = gr.State([])
     calibrate_prompts = gr.State([
     'the moon is melting into my glass of tea',
+    'The city is made of wires, lightning, and vaporwave.',
     'a sea slug -- pair of claws scuttling -- jelly fish floats',
     'an adorable creature. It may be a goblin or a pig or a slug.',
     'an animation about a gorgeous nebula',
