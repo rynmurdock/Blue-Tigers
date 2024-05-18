@@ -343,7 +343,7 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
     if choice == 'Like (L)':
         choice = 1
     elif choice == 'Neither (Space)':
-        img, calibrate_prompts = next_image(user_id, calibrate_prompts)
+        img, calibrate_prompts = next_image(calibrate_prompts, user_id)
         return img, calibrate_prompts
     else:
         choice = 0
@@ -359,7 +359,7 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
     prevs_df.loc[[p.split('/')[1] == img.split('muted_')[1] for p in prevs_df['paths']], 'user:rating'][user_id] = choice
     print(prevs_df['user:rating'], 'user_ratings')
     
-    img, calibrate_prompts = next_image(user_id, calibrate_prompts)
+    img, calibrate_prompts = next_image(calibrate_prompts, user_id)
     
     
     return img, calibrate_prompts
