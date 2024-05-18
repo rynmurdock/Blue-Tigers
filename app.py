@@ -354,8 +354,8 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
         print('NSFW -- choice is disliked')
         choice = 0
     
-    print(img)
-    # TODO clean up
+    print(img, prevs_df['paths'])
+    # TODO we're maybe still not matching correctly here, it seems.
     prevs_df.loc[[p.split('/')[-1] == img.split('muted_')[1] for p in prevs_df['paths']], 'user:rating'][user_id] = choice
     print(prevs_df['user:rating'], 'user_ratings')
     
