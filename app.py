@@ -142,7 +142,7 @@ leave_im_emb, _ = pipe.encode_image(
                 output.frames[0][len(output.frames[0])//2], DEVICE, 1, output_hidden_state
 )
 assert len(output.frames[0]) == 16
-leave_im_emb.to('cpu')
+leave_im_emb.detach().to('cpu')
 
 
 @spaces.GPU()
@@ -219,7 +219,7 @@ def get_user_emb(embs, ys):
     print('Gathering coefficients')
     #lin_class = Ridge(fit_intercept=False).fit(feature_embs, chosen_y)
     lin_class = SVC(max_iter=50000, kernel='linear', C=.1, class_weight='balanced').fit(feature_embs, chosen_y)
-    coef_ = torch.tensor(lin_class.coef_, dtype=torch.double)
+    coef_ = torch.tensor(lin_class.coef_, dtype=torch.double).detach().to('cpu')
     coef_ = coef_ / coef_.abs().max() * 3
     print(coef_.shape, 'COEF')
 
@@ -232,18 +232,19 @@ def get_user_emb(embs, ys):
 
 
 def pluck_img(user_id, user_emb):
-    not_rated_rows = prevs_df[[i['user:rating'].get(user_id, None) is None for i in prevs_df]]
-    rated_rows = prevs_df[[i['user:rating'].get(user_id, None) is not None for i in prevs_df]]
+    not_rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, None) == None for i in prevs_df.iterrows()]]
+    rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, None) != None for i in prevs_df.iterrows()]]
     while len(not_rated_rows) == 0:
-        not_rated_rows = [i for i in prevs_df if i['user:rating'].get(user_id, None) == None]
+        not_rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, None) == None for i in prevs_df.iterrows()]]
         time.sleep(.01)
     # TODO optimize this lol
     best_sim = -1
-    for i in not_rated_rows:
-        sim = torch.cosine_similarity(i['embeddings'], user_emb)
+    for i in not_rated_rows.iterrows():
+        # TODO sloppy .to but it is 3am.
+        sim = torch.cosine_similarity(i[1]['embeddings'].detach().to('cpu'), user_emb.detach().to('cpu'))
         if sim > best_sim:
             best_sim = sim
-            best_row = i
+            best_row = i[1]
     img = best_row['paths']
     embs = rated_rows['embeddings'].to_list()
     ys = [i[user_id] for i in rated_rows['user:rating'].to_list()]
@@ -283,9 +284,9 @@ def background_next_image():
 
 def pluck_embs_ys(user_id):
     rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, None) != None for i in prevs_df.iterrows()]]
-    not_rated_rows = prevs_df[[i['user:rating'].get(user_id, None) is None for i in prevs_df]]
+    not_rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, None) == None for i in prevs_df.iterrows()]]
     while len(not_rated_rows) == 0:
-        not_rated_rows = [i for i in prevs_df if i['user:rating'].get(user_id, None) == None]
+        not_rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, None) == None for i in prevs_df.iterrows()]]
         time.sleep(.01)
     
     embs = rated_rows['embeddings'].to_list()
@@ -308,7 +309,7 @@ def next_image(calibrate_prompts, user_id):
             print('######### Roaming #########')
             
             embs, ys = pluck_embs_ys(user_id_t)
-            image = pluck_img(user_id_t, im_emb)
+            image = pluck_img(user_id_t, embs)
             return image, calibrate_prompts
 
 
