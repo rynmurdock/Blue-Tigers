@@ -356,7 +356,7 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
     
     print(img)
     # TODO clean up
-    prevs_df.loc[[p.split('muted_')[1] == img.split('/')[1] for p in prevs_df['paths']], 'user:rating'][user_id] = choice
+    prevs_df.loc[[p.split('/')[-1] == img.split('muted_')[1] for p in prevs_df['paths']], 'user:rating'][user_id] = choice
     print(prevs_df['user:rating'], 'user_ratings')
     
     img, calibrate_prompts = next_image(calibrate_prompts, user_id)
