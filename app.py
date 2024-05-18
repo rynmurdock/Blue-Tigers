@@ -257,7 +257,7 @@ def background_next_image():
         time.sleep(.01)
     
     latest_user_id = prevs_df.iloc[-1]['latest_user_to_rate']
-    rated_rows = prevs_df[[i[1]['user:rating'] != None and i[1]['user:rating'].get(latest_user_id, None) != None for i in prevs_df.iterrows()]]
+    rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, None) != None for i in prevs_df.iterrows()]]
     
     ys = [i[user_id] for i in rated_rows['user:rating'].to_list()]
     embs = [i[user_id] for i in rated_rows['embeddings'].to_list()]
@@ -355,8 +355,10 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
         choice = 0
     
     print(img, prevs_df['paths'])
-    # TODO we're maybe still not matching correctly here, it seems.
-    prevs_df.loc[[p.split('/')[-1] == img.split('muted_')[1] for p in prevs_df['paths']], 'user:rating'][user_id] = choice
+    # TODO we're maybe still not matching correctly here or not changing what we want, it seems
+    old_d = prevs_df.loc[[p.split('/')[-1] in img for p in prevs_df['paths'].to_list()], 'user:rating']
+    old_d[user_id] = choice
+    prevs_df.loc[[p.split('/')[-1] == img.split('muted_')[1] for p in prevs_df['paths']], 'user:rating'] = old_d
     print(prevs_df['user:rating'], 'user_ratings')
     
     img, calibrate_prompts = next_image(calibrate_prompts, user_id)
