@@ -211,7 +211,7 @@ def get_user_emb(embs, ys):
         print('ys are longer than embs; popping latest rating')
         ys.pop(-1)
     
-    feature_embs = np.array(torch.stack([embs[i].to('cpu') for i in indices] + [leave_im_emb.to('cpu')]).to('cpu'))
+    feature_embs = np.array(torch.stack([embs[i].squeeze().to('cpu') for i in indices] + [leave_im_emb.to('cpu').squeeze()]).to('cpu'))
     #scaler = preprocessing.StandardScaler().fit(feature_embs)
     #feature_embs = scaler.transform(feature_embs)
     chosen_y = np.array([ys[i] for i in indices] + [0])
