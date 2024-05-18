@@ -35,6 +35,7 @@ from sklearn.svm import SVC
 from sklearn.inspection import permutation_importance
 from sklearn import preprocessing
 import pandas as pd
+from apscheduler.schedulers.background import BackgroundScheduler
 
 import random
 import time
@@ -46,8 +47,9 @@ torch.set_grad_enabled(False)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
-import spaces
+prevs_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'latest_user_to_rate'])
 
+import spaces
 prompt_list = [p for p in list(set(
                 pd.read_csv('./twitter_prompts.csv').iloc[:, 1].tolist())) if type(p) == str]
 
@@ -144,21 +146,17 @@ leave_im_emb.to('cpu')
 
 
 @spaces.GPU()
-def generate(prompt, in_im_embs=None, base='basem'):
+def generate(in_im_embs):
 
-    if in_im_embs == None:
-        #in_im_embs = torch.randn(1, 1, 1, 1280, device=DEVICE, dtype=dtype)
-        in_im_embs= torch.load('1708230329.2274947.pt').to('cuda').unsqueeze(0).unsqueeze(0).to(dtype)
-        in_im_embs = in_im_embs / in_im_embs.norm()
-    else:
-        in_im_embs = in_im_embs.to('cuda').unsqueeze(0).unsqueeze(0)
-        #im_embs = torch.cat((torch.zeros(1, 1280, device=DEVICE, dtype=dtype), in_im_embs), 0)
+    in_im_embs = in_im_embs.to('cuda').unsqueeze(0).unsqueeze(0)
+    #im_embs = torch.cat((torch.zeros(1, 1280, device=DEVICE, dtype=dtype), in_im_embs), 0)
 
-    output = pipe(prompt=prompt, guidance_scale=0, added_cond_kwargs={}, ip_adapter_image_embeds=[in_im_embs], num_inference_steps=STEPS)
+    output = pipe(prompt='', guidance_scale=0, added_cond_kwargs={}, ip_adapter_image_embeds=[in_im_embs], num_inference_steps=STEPS)
 
     im_emb, _ = pipe.encode_image(
                 output.frames[0][len(output.frames[0])//2], DEVICE, 1, output_hidden_state
             )
+    im_emb = im_emb.detach().to('cpu')
 
     nsfw = maybe_nsfw(output.frames[0][len(output.frames[0])//2])
     
@@ -170,14 +168,11 @@ def generate(prompt, in_im_embs=None, base='basem'):
         # TODO could return an automatic dislike of auto dislike on the backend for neither as well; just would need refactoring.
         return None, im_emb
     
-    plt.close('all')
-    plt.hist(np.array(im_emb.to('cpu')).flatten(), bins=5)
-    plt.savefig('real_im_emb_plot.jpg')
     
     output.frames[0] = output.frames[0] + list(reversed(output.frames[0]))
 
     write_video(path, output.frames[0])
-    return path, im_emb.to('cpu')
+    return path, im_emb
 
 
 #######################
@@ -185,83 +180,136 @@ def generate(prompt, in_im_embs=None, base='basem'):
 # TODO add to state instead of shared across all
 glob_idx = 0
 
-def next_image(embs, ys, calibrate_prompts):
+# TODO
+# We can keep a df of media paths, embeddings, and user ratings. 
+#   We can drop by lowest user ratings to keep enough RAM available when we get too many rows.
+#   We can continuously update by who is most recently active in the background & server as we go, plucking using "has been seen" and similarity
+#   to user embeds
+
+def get_user_emb(embs, ys):
+    # handle case where every instance of calibration prompts is 'Neither' or 'Like' or 'Dislike'
+    if len(list(set(ys))) <= 1:
+        embs.append(.01*torch.randn(1280))
+        embs.append(.01*torch.randn(1280))
+        ys.append(0)
+        ys.append(1)
+    
+    indices = list(range(len(embs)))
+    # sample only as many negatives as there are positives
+    pos_indices = [i for i in indices if ys[i] == 1]
+    neg_indices = [i for i in indices if ys[i] == 0]
+    #lower = min(len(pos_indices), len(neg_indices))
+    #neg_indices = random.sample(neg_indices, lower)
+    #pos_indices = random.sample(pos_indices, lower)
+    print(len(neg_indices), len(pos_indices))
+    
+    
+    # we may have just encountered a rare multi-threading diffusers issue (https://github.com/huggingface/diffusers/issues/5749);
+    # this ends up adding a rating but losing an embedding, it seems.
+    # let's take off a rating if so to continue without indexing errors.
+    if len(ys) > len(embs):
+        print('ys are longer than embs; popping latest rating')
+        ys.pop(-1)
+    
+    feature_embs = np.array(torch.stack([embs[i].to('cpu') for i in indices] + [leave_im_emb[0].to('cpu')]).to('cpu'))
+    #scaler = preprocessing.StandardScaler().fit(feature_embs)
+    #feature_embs = scaler.transform(feature_embs)
+    chosen_y = np.array([ys[i] for i in indices] + [0])
+    
+    print('Gathering coefficients')
+    #lin_class = Ridge(fit_intercept=False).fit(feature_embs, chosen_y)
+    lin_class = SVC(max_iter=50000, kernel='linear', C=.1, class_weight='balanced').fit(feature_embs, chosen_y)
+    coef_ = torch.tensor(lin_class.coef_, dtype=torch.double)
+    coef_ = coef_ / coef_.abs().max() * 3
+    print(coef_.shape, 'COEF')
+
+    print(coef_)
+    print('Gathered')
+
+    w = 1# if len(embs) % 2 == 0 else 0
+    im_emb = w * coef_.to(dtype=dtype)
+    return im_emb
+
+
+def pluck_img(user_id, user_emb):
+    not_rated_rows = prevs_df[[i['user:rating'].get(user_id, None) is None for i in prevs_df]]
+    rated_rows = prevs_df[[i['user:rating'].get(user_id, None) is not None for i in prevs_df]]
+    while len(not_rated_rows) == 0:
+        not_rated_rows = [i for i in prevs_df if i['user:rating'].get(user_id, None) == None]
+        time.sleep(.01)
+    # TODO optimize this lol
+    best_sim = -1
+    for i in not_rated_rows:
+        sim = torch.cosine_similarity(i['embeddings'], user_emb)
+        if sim > best_sim:
+            best_sim = sim
+            best_row = i
+    img = best_row['paths']
+    embs = rated_rows['embeddings'].to_list()
+    ys = [i[user_id] for i in rated_rows['user:rating'].to_list()]
+    
+    return embs, ys, img
+
+
+def background_next_image():
+    global prevs_df
+    latest_user_id = prevs_df.iloc[-1]['latest_user_to_rate']
+    print([i[1]['user:rating'] for i in prevs_df.iterrows()])
+    rated_rows = prevs_df[[i[1]['user:rating'] != None and i[1]['user:rating'].get(latest_user_id, None) != None for i in prevs_df.iterrows()]]
+    
+    ys = [i[user_id] for i in rated_rows['user:rating'].to_list()]
+    embs = [i[user_id] for i in rated_rows['embeddings'].to_list()]
+    
+    user_emb = get_user_emb(embs, ys)
+    img, embs = generate(user_emb)
+    tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating'])
+    tmp_df['paths'] = [img]
+    tmp_df['embeddings'] = [embs]
+    tmp_df['user:rating'] = [{' ': ' '}]
+    tmp_df['latest_user_to_rate'] = user_id
+    prevs_df = pd.concat((prevs_df, tmp_df))
+    # we can free up storage by deleting the image
+    if len(prevs_df) > 50:
+        oldest_path = prevs_df.iloc[0]['paths']
+        if os.path.isfile(oldest_path):
+            os.remove(oldest_path)
+        else:
+            # If it fails, inform the user.
+            print("Error: %s file not found" % oldest_path)
+        # only keep 50 images & embeddings & ips, then remove oldest
+        prevs_df = prevs_df.iloc[1:]
+    print(prevs_df)
+    
+
+def pluck_embs_ys(user_id):
+    rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, None) != None for i in prevs_df.iterrows()]]
+    not_rated_rows = prevs_df[[i['user:rating'].get(user_id, None) is None for i in prevs_df]]
+    while len(not_rated_rows) == 0:
+        not_rated_rows = [i for i in prevs_df if i['user:rating'].get(user_id, None) == None]
+        time.sleep(.01)
+    
+    embs = rated_rows['embeddings'].to_list()
+    ys = [i[user_id] for i in rated_rows['user:rating'].to_list()]
+    
+    return embs, ys
+
+def next_image(calibrate_prompts, user_id):
     global glob_idx
     glob_idx = glob_idx + 1
-        
+    user_id_t = user_id[0]
+    
     with torch.no_grad():
         if len(calibrate_prompts) > 0:
             print('######### Calibrating with sample prompts #########')
-            prompt = calibrate_prompts.pop(0)
-            print(prompt)
-            image, img_embs = generate(prompt)
-            embs += img_embs
-            print(len(embs))
-            return image, embs, ys, calibrate_prompts
+            cal_video = calibrate_prompts.pop(0)
+            image = prevs_df[prevs_df['paths'] == cal_video]['paths'].to_list()
+            return image, calibrate_prompts
         else:
             print('######### Roaming #########')
             
-            # sample a .8 of rated embeddings for some stochasticity, or at least two embeddings.
-            # could take a sample < len(embs)
-            #n_to_choose = max(int((len(embs))), 2)
-            #indices = random.sample(range(len(embs)), n_to_choose)
-            
-            # handle case where every instance of calibration prompts is 'Neither' or 'Like' or 'Dislike'
-            if len(list(set(ys))) <= 1:
-                embs.append(.01*torch.randn(1280))
-                embs.append(.01*torch.randn(1280))
-                ys.append(0)
-                ys.append(1)
-            #if len(list(ys)) < 10:
-            #    embs += [.01*torch.randn(1280)] * 3
-            #    ys += [-1] * 3
-            
-            indices = list(range(len(embs)))
-            # sample only as many negatives as there are positives
-            pos_indices = [i for i in indices if ys[i] == 1]
-            neg_indices = [i for i in indices if ys[i] == 0]
-            #lower = min(len(pos_indices), len(neg_indices))
-            #neg_indices = random.sample(neg_indices, lower)
-            #pos_indices = random.sample(pos_indices, lower)
-            print(len(neg_indices), len(pos_indices))
-            
-            
-            # we may have just encountered a rare multi-threading diffusers issue (https://github.com/huggingface/diffusers/issues/5749);
-            # this ends up adding a rating but losing an embedding, it seems.
-            # let's take off a rating if so to continue without indexing errors.
-            if len(ys) > len(embs):
-                print('ys are longer than embs; popping latest rating')
-                ys.pop(-1)
-            
-            feature_embs = np.array(torch.stack([embs[i].to('cpu') for i in indices] + [leave_im_emb[0].to('cpu')]).to('cpu'))
-            #scaler = preprocessing.StandardScaler().fit(feature_embs)
-            #feature_embs = scaler.transform(feature_embs)
-            chosen_y = np.array([ys[i] for i in indices] + [0])
-            
-            print('Gathering coefficients')
-            #lin_class = Ridge(fit_intercept=False).fit(feature_embs, chosen_y)
-            lin_class = SVC(max_iter=50000, kernel='linear', C=.1, class_weight='balanced').fit(feature_embs, chosen_y)
-            coef_ = torch.tensor(lin_class.coef_, dtype=torch.double)
-            coef_ = coef_ / coef_.abs().max() * 3
-            print(coef_.shape, 'COEF')
-
-            plt.close('all')
-            plt.hist(np.array(coef_).flatten(), bins=5)
-            plt.savefig('plot.jpg')
-            print(coef_)
-            print('Gathered')
-
-            rng_prompt = random.choice(prompt_list)
-            w = 1# if len(embs) % 2 == 0 else 0
-            im_emb = w * coef_.to(dtype=dtype)
-
-            prompt= '' if glob_idx % 3 != 0 else rng_prompt
-            print(prompt)
-            image, im_emb = generate(prompt, im_emb)
-            embs += im_emb
-            
-            
-            return image, embs, ys, calibrate_prompts
+            embs, ys = pluck_embs_ys(user_id_t)
+            image = pluck_img(user_id_t, im_emb)
+            return image, calibrate_prompts
 
 
 
@@ -271,39 +319,44 @@ def next_image(embs, ys, calibrate_prompts):
 
 
 
-def start(_, embs, ys, calibrate_prompts):
-    image, embs, ys, calibrate_prompts = next_image(embs, ys, calibrate_prompts)
+def start(_, calibrate_prompts, user_id, request: gr.Request):
+    user_id_t = user_id[0]
+    image, calibrate_prompts = next_image(calibrate_prompts, user_id_t)
+    print(image, calibrate_prompts)
     return [
             gr.Button(value='Like (L)', interactive=True), 
             gr.Button(value='Neither (Space)', interactive=True), 
             gr.Button(value='Dislike (A)', interactive=True),
             gr.Button(value='Start', interactive=False),
-            image,
-            embs,
-            ys,
+            image[0],
             calibrate_prompts
             ]
 
 
-def choose(img, choice, embs, ys, calibrate_prompts):
+def choose(img, choice, user_id, calibrate_prompts, request: gr.Request):
+    global prevs_df
+    
+    
     if choice == 'Like (L)':
         choice = 1
     elif choice == 'Neither (Space)':
-        embs = embs[:-1]
-        img, embs, ys, calibrate_prompts = next_image(embs, ys, calibrate_prompts)
-        return img, embs, ys, calibrate_prompts
+        img, calibrate_prompts = next_image(user_id, calibrate_prompts)
+        return img, calibrate_prompts
     else:
         choice = 0
-
+    
     # if we detected NSFW, leave that area of latent space regardless of how they rated chosen.
-    # TODO skip allowing rating
+    # TODO skip allowing rating & just continue
     if img == None:
         print('NSFW -- choice is disliked')
         choice = 0
     
-    ys += [choice]*1
-    img, embs, ys, calibrate_prompts = next_image(embs, ys, calibrate_prompts)
-    return img, embs, ys, calibrate_prompts
+    prevs_df['user:rating']['user_id'] = choice
+    
+    img, calibrate_prompts = next_image(user_id, calibrate_prompts)
+    
+    
+    return img[0], calibrate_prompts
 
 css = '''.gradio-container{max-width: 700px !important}
 #description{text-align: center}
@@ -363,15 +416,11 @@ with gr.Blocks(css=css, head=js_head) as demo:
 
 Explore the latent space without text prompts based on your preferences. Learn more on [the write-up](https://rynmurdock.github.io/posts/2024/3/generative_recomenders/).
     ''', elem_id="description")
-    embs = gr.State([])
-    ys = gr.State([])
+    user_id = gr.State([torch.randint(2**6, (1,))])
     calibrate_prompts = gr.State([
-    'the moon is melting into my glass of tea',
-    'a sea slug -- pair of claws scuttling -- jelly fish floats',
-    'an adorable creature. It may be a goblin or a pig or a slug.',
-    'an animation about a gorgeous nebula',
-    'a sketch of an impressive mountain by da vinci',
-    'a watercolor painting: the octopus writhes',
+    './first.mp4',
+    './second.mp4',
+    './third.mp4',
     ])
     def l():
         return None
@@ -393,30 +442,53 @@ Explore the latent space without text prompts based on your preferences. Learn m
         b1 = gr.Button(value='Like (L)', interactive=False, elem_id="like")
         b1.click(
         choose, 
-        [img, b1, embs, ys, calibrate_prompts],
-        [img, embs, ys, calibrate_prompts]
+        [img, b1, calibrate_prompts, user_id],
+        [img, calibrate_prompts],
         )
         b2.click(
         choose, 
-        [img, b2, embs, ys, calibrate_prompts],
-        [img, embs, ys, calibrate_prompts]
+        [img, b2, calibrate_prompts, user_id],
+        [img, calibrate_prompts],
         )
         b3.click(
         choose, 
-        [img, b3, embs, ys, calibrate_prompts],
-        [img, embs, ys, calibrate_prompts]
+        [img, b3, calibrate_prompts, user_id],
+        [img, calibrate_prompts],
         )
     with gr.Row():
         b4 = gr.Button(value='Start')
         b4.click(start,
-                 [b4, embs, ys, calibrate_prompts],
-                 [b1, b2, b3, b4, img, embs, ys, calibrate_prompts])
+                 [b4, calibrate_prompts, user_id],
+                 [b1, b2, b3, b4, img, calibrate_prompts]
+                 )
     with gr.Row():
-        html = gr.HTML('''<div style='text-align:center; font-size:20px'>You will calibrate for several prompts and then roam. </ div><br><br><br>
+        html = gr.HTML('''<div style='text-align:center; font-size:20px'>You will calibrate for several videos and then roam. </ div><br><br><br>
 <div style='text-align:center; font-size:14px'>Note that while the AnimateLCM model with NSFW filtering is unlikely to produce NSFW images, this may still occur, and users should avoid NSFW content when rating.
 </ div>
 <br><br>
 <div style='text-align:center; font-size:14px'>Thanks to @multimodalart for their contributions to the demo, esp. the interface and @maxbittker for feedback.
 </ div>''')
+
+scheduler = BackgroundScheduler()
+scheduler.add_job(func=background_next_image, trigger="interval", seconds=10)
+scheduler.start()
+
+# prep our calibration prompts
+for im in [
+    './first.mp4',
+    './second.mp4',
+    './third.mp4',
+    ]:
+    tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating'])
+    tmp_df['paths'] = [im]
+    image = list(imageio.imiter(im))[0]
+    im_emb, _ = pipe.encode_image(
+                image, DEVICE, 1, output_hidden_state
+            )
+
+    tmp_df['embeddings'] = [im_emb.detach().to('cpu')]
+    tmp_df['user:rating'] = [{' ': ' '}]
+    prevs_df = pd.concat((prevs_df, tmp_df))
+
 
 demo.launch(share=True)
