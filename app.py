@@ -221,9 +221,6 @@ def get_user_emb(embs, ys):
     lin_class = SVC(max_iter=50000, kernel='linear', C=.1, class_weight='balanced').fit(feature_embs, chosen_y)
     coef_ = torch.tensor(lin_class.coef_, dtype=torch.double).detach().to('cpu')
     coef_ = coef_ / coef_.abs().max() * 3
-    print(coef_.shape, 'COEF')
-
-    print(coef_)
     print('Gathered')
 
     w = 1# if len(embs) % 2 == 0 else 0
@@ -232,13 +229,14 @@ def get_user_emb(embs, ys):
 
 
 def pluck_img(user_id, user_emb):
+    print(user_id, 'user_id')
     not_rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, None) == None for i in prevs_df.iterrows()]]
     rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, None) != None for i in prevs_df.iterrows()]]
     while len(not_rated_rows) == 0:
         not_rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, None) == None for i in prevs_df.iterrows()]]
         time.sleep(.01)
     # TODO optimize this lol
-    best_sim = -1
+    best_sim = -100000
     for i in not_rated_rows.iterrows():
         # TODO sloppy .to but it is 3am.
         sim = torch.cosine_similarity(i[1]['embeddings'].detach().to('cpu'), user_emb.detach().to('cpu'))
@@ -246,16 +244,19 @@ def pluck_img(user_id, user_emb):
             best_sim = sim
             best_row = i[1]
     img = best_row['paths']
-    embs = rated_rows['embeddings'].to_list()
-    ys = [i[user_id] for i in rated_rows['user:rating'].to_list()]
-    
-    return embs, ys, img
+    return img
 
 
 def background_next_image():
     global prevs_df
+    
+    # TODO only let it get N (maybe 3) ahead of the user
+    not_rated_rows = prevs_df[[i[1]['user:rating'] == {' ': ' '} for i in prevs_df.iterrows()]]
+    while len(not_rated_rows) > 5:
+        not_rated_rows = prevs_df[[i[1]['user:rating'] == {' ': ' '} for i in prevs_df.iterrows()]]
+        time.sleep(.01)
+    
     latest_user_id = prevs_df.iloc[-1]['latest_user_to_rate']
-    print([i[1]['user:rating'] for i in prevs_df.iterrows()])
     rated_rows = prevs_df[[i[1]['user:rating'] != None and i[1]['user:rating'].get(latest_user_id, None) != None for i in prevs_df.iterrows()]]
     
     ys = [i[user_id] for i in rated_rows['user:rating'].to_list()]
@@ -297,19 +298,19 @@ def pluck_embs_ys(user_id):
 def next_image(calibrate_prompts, user_id):
     global glob_idx
     glob_idx = glob_idx + 1
-    user_id_t = user_id[0]
+    user_id_t = user_id
     
     with torch.no_grad():
         if len(calibrate_prompts) > 0:
             print('######### Calibrating with sample prompts #########')
             cal_video = calibrate_prompts.pop(0)
-            image = prevs_df[prevs_df['paths'] == cal_video]['paths'].to_list()
+            image = prevs_df[prevs_df['paths'] == cal_video]['paths'].to_list()[0]
             return image, calibrate_prompts
         else:
             print('######### Roaming #########')
-            
             embs, ys = pluck_embs_ys(user_id_t)
-            image = pluck_img(user_id_t, embs)
+            user_emb = get_user_emb(embs, ys)
+            image = pluck_img(user_id_t, user_emb)
             return image, calibrate_prompts
 
 
@@ -321,7 +322,8 @@ def next_image(calibrate_prompts, user_id):
 
 
 def start(_, calibrate_prompts, user_id, request: gr.Request):
-    user_id_t = user_id[0]
+    # TODO remove user_id_t s
+    user_id_t = user_id
     image, calibrate_prompts = next_image(calibrate_prompts, user_id_t)
     print(image, calibrate_prompts)
     return [
@@ -329,7 +331,7 @@ def start(_, calibrate_prompts, user_id, request: gr.Request):
             gr.Button(value='Neither (Space)', interactive=True), 
             gr.Button(value='Dislike (A)', interactive=True),
             gr.Button(value='Start', interactive=False),
-            image[0],
+            image,
             calibrate_prompts
             ]
 
@@ -352,12 +354,18 @@ def choose(img, choice, user_id, calibrate_prompts, request: gr.Request):
         print('NSFW -- choice is disliked')
         choice = 0
     
-    prevs_df['user:rating']['user_id'] = choice
+    print(img)
+    # TODO we don't change anything here because img is muted, moved
+    ol_dict = prevs_df.loc[[p.split('/')[1] == img.split('muted_')[1] for p in prevs_df['paths']], 'user:rating']
+    ol_dict['user_id'] = choice
+    print(ol_dict, 'old_dict')
+    prevs_df.loc[prevs_df['paths'] == img, 'user:rating'] = ol_dict
+    print(prevs_df['user:rating'], 'user_ratings')
     
     img, calibrate_prompts = next_image(user_id, calibrate_prompts)
     
     
-    return img[0], calibrate_prompts
+    return img, calibrate_prompts
 
 css = '''.gradio-container{max-width: 700px !important}
 #description{text-align: center}
@@ -417,11 +425,15 @@ with gr.Blocks(css=css, head=js_head) as demo:
 
 Explore the latent space without text prompts based on your preferences. Learn more on [the write-up](https://rynmurdock.github.io/posts/2024/3/generative_recomenders/).
     ''', elem_id="description")
-    user_id = gr.State([torch.randint(2**6, (1,))])
+    user_id = gr.State(torch.randint(2**6, (1,))[0])
     calibrate_prompts = gr.State([
     './first.mp4',
     './second.mp4',
     './third.mp4',
+    './fourth.mp4',
+    './fifth.mp4',
+    './sixth.mp4',
+    './seventh.mp4',
     ])
     def l():
         return None
@@ -479,6 +491,10 @@ for im in [
     './first.mp4',
     './second.mp4',
     './third.mp4',
+    './fourth.mp4',
+    './fifth.mp4',
+    './sixth.mp4',
+    './seventh.mp4',
     ]:
     tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating'])
     tmp_df['paths'] = [im]
