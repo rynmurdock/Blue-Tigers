@@ -498,7 +498,8 @@ for im in [
     ]:
     tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating'])
     tmp_df['paths'] = [im]
-    image = list(imageio.imiter(im))[0]
+    image = list(imageio.imiter(im))
+    image = image[len(image)//2]
     im_emb, _ = pipe.encode_image(
                 image, DEVICE, 1, output_hidden_state
             )
