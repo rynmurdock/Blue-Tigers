@@ -336,7 +336,7 @@ def start(_, calibrate_prompts, user_id, request: gr.Request):
             ]
 
 
-def choose(img, choice, user_id, calibrate_prompts, request: gr.Request):
+def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
     global prevs_df
     
     
@@ -355,11 +355,8 @@ def choose(img, choice, user_id, calibrate_prompts, request: gr.Request):
         choice = 0
     
     print(img)
-    # TODO we don't change anything here because img is muted, moved
-    ol_dict = prevs_df.loc[[p.split('/')[1] == img.split('muted_')[1] for p in prevs_df['paths']], 'user:rating']
-    ol_dict['user_id'] = choice
-    print(ol_dict, 'old_dict')
-    prevs_df.loc[prevs_df['paths'] == img, 'user:rating'] = ol_dict
+    # TODO clean up
+    prevs_df.loc[[p.split('/')[1] == img.split('muted_')[1] for p in prevs_df['paths']], 'user:rating'][user_id] = choice
     print(prevs_df['user:rating'], 'user_ratings')
     
     img, calibrate_prompts = next_image(user_id, calibrate_prompts)
@@ -425,7 +422,7 @@ with gr.Blocks(css=css, head=js_head) as demo:
 
 Explore the latent space without text prompts based on your preferences. Learn more on [the write-up](https://rynmurdock.github.io/posts/2024/3/generative_recomenders/).
     ''', elem_id="description")
-    user_id = gr.State(torch.randint(2**6, (1,))[0])
+    user_id = gr.State(int(torch.randint(2**6, (1,))[0]))
     calibrate_prompts = gr.State([
     './first.mp4',
     './second.mp4',
