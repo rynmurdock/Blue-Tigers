@@ -1,4 +1,7 @@
 
+
+
+# TODO save & restart from (if it exists) dataframe parquet
 import torch
 
 # lol
@@ -246,24 +249,24 @@ def background_next_image():
     # only let it get N (maybe 3) ahead of the user
     not_rated_rows = prevs_df[[i[1]['user:rating'] == {' ': ' '} for i in prevs_df.iterrows()]]
     rated_rows = prevs_df[[i[1]['user:rating'] != {' ': ' '} for i in prevs_df.iterrows()]]
-    while len(not_rated_rows) > 5 or len(rated_rows) < 5:
+    while len(not_rated_rows) > 8 or len(rated_rows) < 4:
         not_rated_rows = prevs_df[[i[1]['user:rating'] == {' ': ' '} for i in prevs_df.iterrows()]]
         rated_rows = prevs_df[[i[1]['user:rating'] != {' ': ' '} for i in prevs_df.iterrows()]]
         time.sleep(.01)
     
-    latest_user_id = prevs_df.iloc[-1]['latest_user_to_rate']
+    print(rated_rows['latest_user_to_rate'])
+    latest_user_id = rated_rows.iloc[-1]['latest_user_to_rate']
     rated_rows = prevs_df[[i[1]['user:rating'].get(latest_user_id, None) is not None for i in prevs_df.iterrows()]]
     
-    ys = [i[latest_user_id] for i in rated_rows['user:rating'].to_list()]
-    embs = [i for i in rated_rows['embeddings'].to_list()]
+    print(latest_user_id)
+    embs, ys = pluck_embs_ys(latest_user_id)
     
     user_emb = get_user_emb(embs, ys)
     img, embs = generate(user_emb)
-    tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating'])
+    tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'latest_user_to_rate'])
     tmp_df['paths'] = [img]
     tmp_df['embeddings'] = [embs]
     tmp_df['user:rating'] = [{' ': ' '}]
-    tmp_df['latest_user_to_rate'] = latest_user_id
     prevs_df = pd.concat((prevs_df, tmp_df))
     # we can free up storage by deleting the image
     if len(prevs_df) > 50:
@@ -282,6 +285,7 @@ def pluck_embs_ys(user_id):
     not_rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, None) == None for i in prevs_df.iterrows()]]
     while len(not_rated_rows) == 0:
         not_rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, None) == None for i in prevs_df.iterrows()]]
+        rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, None) != None for i in prevs_df.iterrows()]]
         time.sleep(.01)
     
     embs = rated_rows['embeddings'].to_list()
@@ -298,6 +302,7 @@ def next_image(calibrate_prompts, user_id):
             print('######### Calibrating with sample media #########')
             cal_video = calibrate_prompts.pop(0)
             image = prevs_df[prevs_df['paths'] == cal_video]['paths'].to_list()[0]
+            
             return image, calibrate_prompts
         else:
             print('######### Roaming #########')
@@ -348,10 +353,10 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
     old_d = prevs_df.loc[[p.split('/')[-1] in img for p in prevs_df['paths'].to_list()], 'user:rating'][0]
     old_d[user_id] = choice
     prevs_df.loc[[p.split('/')[-1] in img for p in prevs_df['paths'].to_list()], 'user:rating'][0] = old_d
+    prevs_df.loc[[p.split('/')[-1] in img for p in prevs_df['paths'].to_list()], 'latest_user_to_rate'] = [user_id]
+    print('full_df, prevs_df', prevs_df, prevs_df['latest_user_to_rate'])
     
     img, calibrate_prompts = next_image(calibrate_prompts, user_id)
-    
-    
     return img, calibrate_prompts
 
 css = '''.gradio-container{max-width: 700px !important}
