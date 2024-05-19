@@ -89,13 +89,6 @@ def write_video(file_name, images, fps=17):
     container.close()
     print('Saved')
 
-bases = {
-    #"basem": "emilianJR/epiCRealism"
-    #SG161222/Realistic_Vision_V6.0_B1_noVAE
-    #runwayml/stable-diffusion-v1-5
-    #frankjoshua/realisticVisionV51_v51VAE
-    #Lykon/dreamshaper-7
-}
 
 image_encoder = CLIPVisionModelWithProjection.from_pretrained("h94/IP-Adapter", subfolder="sdxl_models/image_encoder", torch_dtype=dtype).to(DEVICE)
 #vae = AutoencoderTiny.from_pretrained("madebyollin/taesd", torch_dtype=dtype)
@@ -147,11 +140,10 @@ leave_im_emb.detach().to('cpu')
 
 @spaces.GPU()
 def generate(in_im_embs):
-
     in_im_embs = in_im_embs.to('cuda').unsqueeze(0).unsqueeze(0)
     #im_embs = torch.cat((torch.zeros(1, 1280, device=DEVICE, dtype=dtype), in_im_embs), 0)
 
-    output = pipe(prompt='', guidance_scale=0, added_cond_kwargs={}, ip_adapter_image_embeds=[in_im_embs], num_inference_steps=STEPS)
+    output = pipe(prompt='a scene', guidance_scale=0, added_cond_kwargs={}, ip_adapter_image_embeds=[in_im_embs], num_inference_steps=STEPS)
 
     im_emb, _ = pipe.encode_image(
                 output.frames[0][len(output.frames[0])//2], DEVICE, 1, output_hidden_state
@@ -187,12 +179,13 @@ glob_idx = 0
 #   to user embeds
 
 def get_user_emb(embs, ys):
-    # handle case where every instance of calibration prompts is 'Neither' or 'Like' or 'Dislike'
+    # handle case where every instance of calibration videos is 'Neither' or 'Like' or 'Dislike'
     if len(list(set(ys))) <= 1:
         embs.append(.01*torch.randn(1280))
         embs.append(.01*torch.randn(1280))
         ys.append(0)
         ys.append(1)
+        print('Fixing only one feedback class available.\n')
     
     indices = list(range(len(embs)))
     # sample only as many negatives as there are positives
@@ -250,17 +243,19 @@ def pluck_img(user_id, user_emb):
 def background_next_image():
     global prevs_df
     
-    # TODO only let it get N (maybe 3) ahead of the user
+    # only let it get N (maybe 3) ahead of the user
     not_rated_rows = prevs_df[[i[1]['user:rating'] == {' ': ' '} for i in prevs_df.iterrows()]]
-    while len(not_rated_rows) > 5:
+    rated_rows = prevs_df[[i[1]['user:rating'] != {' ': ' '} for i in prevs_df.iterrows()]]
+    while len(not_rated_rows) > 5 or len(rated_rows) < 5:
         not_rated_rows = prevs_df[[i[1]['user:rating'] == {' ': ' '} for i in prevs_df.iterrows()]]
+        rated_rows = prevs_df[[i[1]['user:rating'] != {' ': ' '} for i in prevs_df.iterrows()]]
         time.sleep(.01)
     
     latest_user_id = prevs_df.iloc[-1]['latest_user_to_rate']
-    rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, None) != None for i in prevs_df.iterrows()]]
+    rated_rows = prevs_df[[i[1]['user:rating'].get(latest_user_id, None) is not None for i in prevs_df.iterrows()]]
     
-    ys = [i[user_id] for i in rated_rows['user:rating'].to_list()]
-    embs = [i[user_id] for i in rated_rows['embeddings'].to_list()]
+    ys = [i[latest_user_id] for i in rated_rows['user:rating'].to_list()]
+    embs = [i for i in rated_rows['embeddings'].to_list()]
     
     user_emb = get_user_emb(embs, ys)
     img, embs = generate(user_emb)
@@ -268,7 +263,7 @@ def background_next_image():
     tmp_df['paths'] = [img]
     tmp_df['embeddings'] = [embs]
     tmp_df['user:rating'] = [{' ': ' '}]
-    tmp_df['latest_user_to_rate'] = user_id
+    tmp_df['latest_user_to_rate'] = latest_user_id
     prevs_df = pd.concat((prevs_df, tmp_df))
     # we can free up storage by deleting the image
     if len(prevs_df) > 50:
@@ -280,7 +275,6 @@ def background_next_image():
             print("Error: %s file not found" % oldest_path)
         # only keep 50 images & embeddings & ips, then remove oldest
         prevs_df = prevs_df.iloc[1:]
-    print(prevs_df)
     
 
 def pluck_embs_ys(user_id):
@@ -292,25 +286,24 @@ def pluck_embs_ys(user_id):
     
     embs = rated_rows['embeddings'].to_list()
     ys = [i[user_id] for i in rated_rows['user:rating'].to_list()]
-    
+    print('embs', 'ys', embs, ys)
     return embs, ys
 
 def next_image(calibrate_prompts, user_id):
     global glob_idx
     glob_idx = glob_idx + 1
-    user_id_t = user_id
     
     with torch.no_grad():
         if len(calibrate_prompts) > 0:
-            print('######### Calibrating with sample prompts #########')
+            print('######### Calibrating with sample media #########')
             cal_video = calibrate_prompts.pop(0)
             image = prevs_df[prevs_df['paths'] == cal_video]['paths'].to_list()[0]
             return image, calibrate_prompts
         else:
             print('######### Roaming #########')
-            embs, ys = pluck_embs_ys(user_id_t)
+            embs, ys = pluck_embs_ys(user_id)
             user_emb = get_user_emb(embs, ys)
-            image = pluck_img(user_id_t, user_emb)
+            image = pluck_img(user_id, user_emb)
             return image, calibrate_prompts
 
 
@@ -322,10 +315,7 @@ def next_image(calibrate_prompts, user_id):
 
 
 def start(_, calibrate_prompts, user_id, request: gr.Request):
-    # TODO remove user_id_t s
-    user_id_t = user_id
-    image, calibrate_prompts = next_image(calibrate_prompts, user_id_t)
-    print(image, calibrate_prompts)
+    image, calibrate_prompts = next_image(calibrate_prompts, user_id)
     return [
             gr.Button(value='Like (L)', interactive=True), 
             gr.Button(value='Neither (Space)', interactive=True), 
@@ -354,13 +344,10 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
         print('NSFW -- choice is disliked')
         choice = 0
     
-    print(img, prevs_df['paths'])
-    # TODO we're maybe still not matching correctly here or not changing what we want, it seems
+    # TODO clean up
     old_d = prevs_df.loc[[p.split('/')[-1] in img for p in prevs_df['paths'].to_list()], 'user:rating'][0]
     old_d[user_id] = choice
-    print(old_d)
     prevs_df.loc[[p.split('/')[-1] in img for p in prevs_df['paths'].to_list()], 'user:rating'][0] = old_d
-    print(prevs_df['user:rating'], 'user_ratings')
     
     img, calibrate_prompts = next_image(calibrate_prompts, user_id)
     
@@ -483,7 +470,7 @@ Explore the latent space without text prompts based on your preferences. Learn m
 </ div>''')
 
 scheduler = BackgroundScheduler()
-scheduler.add_job(func=background_next_image, trigger="interval", seconds=10)
+scheduler.add_job(func=background_next_image, trigger="interval", seconds=1)
 scheduler.start()
 
 # prep our calibration prompts
