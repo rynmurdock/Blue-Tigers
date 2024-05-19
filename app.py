@@ -322,7 +322,7 @@ def start(_, calibrate_prompts, user_id, request: gr.Request):
     image, calibrate_prompts = next_image(calibrate_prompts, user_id)
     return [
             gr.Button(value='Like (L)', interactive=True), 
-            gr.Button(value='Neither (Space)', interactive=True), 
+            gr.Button(value='Neither (Space)', interactive=True, visible=False), 
             gr.Button(value='Dislike (A)', interactive=True),
             gr.Button(value='Start', interactive=False),
             image,
@@ -438,7 +438,7 @@ Explore the latent space without text prompts based on your preferences. Learn m
         img.play(l, js='''document.querySelector('[data-testid="Lightning-player"]').loop = true''')
     with gr.Row(equal_height=True):
         b3 = gr.Button(value='Dislike (A)', interactive=False, elem_id="dislike")
-        b2 = gr.Button(value='Neither (Space)', interactive=False, elem_id="neither")
+        b2 = gr.Button(value='Neither (Space)', interactive=False, elem_id="neither", visible=False)
         b1 = gr.Button(value='Like (L)', interactive=False, elem_id="like")
         b1.click(
         choose, 
