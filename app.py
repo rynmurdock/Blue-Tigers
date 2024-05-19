@@ -3,6 +3,7 @@
 
 # TODO save & restart from (if it exists) dataframe parquet
 import torch
+import os
 
 # lol
 DEVICE = 'cuda'
@@ -68,6 +69,8 @@ from transformers import CLIPVisionModelWithProjection
 import uuid
 import av
 
+
+# TODO make this non blocking? It seems to be printing warnings, etc. and stopping already-loaded images from quickly arriving.
 def write_video(file_name, images, fps=17):
     print('Saving')
     container = av.open(file_name, mode="w")
@@ -254,11 +257,9 @@ def background_next_image():
         rated_rows = prevs_df[[i[1]['user:rating'] != {' ': ' '} for i in prevs_df.iterrows()]]
         time.sleep(.01)
     
-    print(rated_rows['latest_user_to_rate'])
     latest_user_id = rated_rows.iloc[-1]['latest_user_to_rate']
     rated_rows = prevs_df[[i[1]['user:rating'].get(latest_user_id, None) is not None for i in prevs_df.iterrows()]]
     
-    print(latest_user_id)
     embs, ys = pluck_embs_ys(latest_user_id)
     
     user_emb = get_user_emb(embs, ys)
