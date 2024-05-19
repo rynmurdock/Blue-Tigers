@@ -74,7 +74,7 @@ def write_video(file_name, images, fps=17):
 
     stream = container.add_stream("h264", rate=fps)
     # stream.options = {'preset': 'faster'}
-    stream.thread_count = 0
+    stream.thread_type = "AUTO"
     stream.width = 512
     stream.height = 512
     stream.pix_fmt = "yuv420p"
@@ -249,7 +249,7 @@ def background_next_image():
     # only let it get N (maybe 3) ahead of the user
     not_rated_rows = prevs_df[[i[1]['user:rating'] == {' ': ' '} for i in prevs_df.iterrows()]]
     rated_rows = prevs_df[[i[1]['user:rating'] != {' ': ' '} for i in prevs_df.iterrows()]]
-    while len(not_rated_rows) > 8 or len(rated_rows) < 4:
+    while len(not_rated_rows) > 3 or len(rated_rows) < 3:
         not_rated_rows = prevs_df[[i[1]['user:rating'] == {' ': ' '} for i in prevs_df.iterrows()]]
         rated_rows = prevs_df[[i[1]['user:rating'] != {' ': ' '} for i in prevs_df.iterrows()]]
         time.sleep(.01)
@@ -290,7 +290,6 @@ def pluck_embs_ys(user_id):
     
     embs = rated_rows['embeddings'].to_list()
     ys = [i[user_id] for i in rated_rows['user:rating'].to_list()]
-    print('embs', 'ys', embs, ys)
     return embs, ys
 
 def next_image(calibrate_prompts, user_id):
@@ -334,7 +333,6 @@ def start(_, calibrate_prompts, user_id, request: gr.Request):
 def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
     global prevs_df
     
-    
     if choice == 'Like (L)':
         choice = 1
     elif choice == 'Neither (Space)':
@@ -348,14 +346,11 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
     if img == None:
         print('NSFW -- choice is disliked')
         choice = 0
-    
+
     # TODO clean up
-    old_d = prevs_df.loc[[p.split('/')[-1] in img for p in prevs_df['paths'].to_list()], 'user:rating'][0]
-    old_d[user_id] = choice
-    prevs_df.loc[[p.split('/')[-1] in img for p in prevs_df['paths'].to_list()], 'user:rating'][0] = old_d
-    prevs_df.loc[[p.split('/')[-1] in img for p in prevs_df['paths'].to_list()], 'latest_user_to_rate'] = [user_id]
-    print('full_df, prevs_df', prevs_df, prevs_df['latest_user_to_rate'])
-    
+    row_mask = [p.split('/')[-1] in img for p in prevs_df['paths'].to_list()]
+    old_d = prevs_df.loc[row_mask, 'user:rating'][0][user_id] = choice
+    prevs_df.loc[row_mask, 'latest_user_to_rate'] = [user_id]
     img, calibrate_prompts = next_image(calibrate_prompts, user_id)
     return img, calibrate_prompts
 
