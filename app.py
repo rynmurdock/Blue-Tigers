@@ -1,23 +1,15 @@
 
 
-
-
-
-
-
-
-
 # TODO unify/merge origin and this
 # TODO save & restart from (if it exists) dataframe parquet
 import torch
 
-torch.set_grad_enabled(False)
-
-
-
-from collections import OrderedDict
-
-
+# lol
+DEVICE = 'cuda'
+STEPS = 6
+output_hidden_state = False
+device = "cuda"
+dtype = torch.bfloat16
 
 import matplotlib.pyplot as plt
 import matplotlib
@@ -40,24 +32,17 @@ import threading
 import random
 import time
 from PIL import Image
+from safety_checker_improved import maybe_nsfw
 
 
 torch.set_grad_enabled(False)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
+prevs_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'latest_user_to_rate', 'from_user_id'])
 
 import spaces
 start_time = time.time()
-
-
-output_hidden_state = False
-device = "cuda"
-dtype = torch.bfloat16
-DEVICE = 'cuda'
-
-
-
 
 ####################### Setup Model
 from diffusers import AnimateDiffPipeline, MotionAdapter, EulerDiscreteScheduler, LCMScheduler, AutoencoderTiny, UNet2DConditionModel, AutoencoderKL
@@ -70,7 +55,6 @@ import uuid
 import av
 
 def write_video(file_name, images, fps=17):
-    print('Saving')
     container = av.open(file_name, mode="w")
 
     stream = container.add_stream("h264", rate=fps)
@@ -91,7 +75,6 @@ def write_video(file_name, images, fps=17):
         container.mux(packet)
     # Close the file
     container.close()
-    print('Saved')
 
 def imio_write_video(file_name, images, fps=15):
     writer = imageio.get_writer(file_name, fps=fps)
@@ -101,176 +84,93 @@ def imio_write_video(file_name, images, fps=15):
     writer.close()
 
 
+image_encoder = CLIPVisionModelWithProjection.from_pretrained("h94/IP-Adapter", subfolder="sdxl_models/image_encoder", torch_dtype=dtype, 
+device_map='cuda')
+#vae = AutoencoderTiny.from_pretrained("madebyollin/taesd", torch_dtype=dtype)
+
+# vae = ConsistencyDecoderVAE.from_pretrained("openai/consistency-decoder", torch_dtype=dtype)
+# vae = compile_unet(vae, config=config)
+
+#finetune_path = '''/home/ryn_mote/Misc/finetune-sd1.5/dreambooth-model best'''''
+#unet = UNet2DConditionModel.from_pretrained(finetune_path+'/unet/').to(dtype)
+#text_encoder = CLIPTextModel.from_pretrained(finetune_path+'/text_encoder/').to(dtype)
 
 
 unet = UNet2DConditionModel.from_pretrained('rynmurdock/Sea_Claws', subfolder='unet',).to(dtype).to('cpu')
 text_encoder = CLIPTextModel.from_pretrained('rynmurdock/Sea_Claws', subfolder='text_encoder', 
 device_map='cpu').to(dtype)
 
-
 adapter = MotionAdapter.from_pretrained("wangfuyun/AnimateLCM")
-pipe = AnimateDiffPipeline.from_pretrained("runwayml/stable-diffusion-v1-5", motion_adapter=adapter, torch_dtype=dtype, unet=unet, text_encoder=text_encoder)
+pipe = AnimateDiffPipeline.from_pretrained("runwayml/stable-diffusion-v1-5", motion_adapter=adapter, image_encoder=image_encoder, torch_dtype=dtype, unet=unet, text_encoder=text_encoder)
 pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config, beta_schedule="linear")
 pipe.load_lora_weights("wangfuyun/AnimateLCM", weight_name="AnimateLCM_sd15_t2v_lora.safetensors", adapter_name="lcm-lora",)
-pipe.set_adapters(["lcm-lora"], [.8])
+pipe.set_adapters(["lcm-lora"], [.9])
 pipe.fuse_lora()
+
+
+#pipe = AnimateDiffPipeline.from_pretrained('emilianJR/epiCRealism', torch_dtype=dtype, image_encoder=image_encoder)
+#pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing", beta_schedule="linear")
+#repo = "ByteDance/AnimateDiff-Lightning"
+#ckpt = f"animatediff_lightning_4step_diffusers.safetensors"
+
+
+pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15_vit-G.bin", map_location='cpu')
+# This IP adapter improves outputs substantially.
+pipe.set_ip_adapter_scale(1.)
 pipe.unet.fuse_qkv_projections()
-pipe.enable_vae_slicing()
-pipe.enable_vae_tiling()
-
-#image_encoder = CLIPVisionModelWithProjection.from_pretrained("h94/IP-Adapter", subfolder="sdxl_models/image_encoder", torch_dtype=dtype, 
-#      device_map='cpu')
-
-#pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", image_encoder=image_encoder, weight_name="ip-adapter_sd15_vit-G.bin", map_location='cpu')
-#pipe.set_ip_adapter_scale(1.)
-
-pipe.to(DEVICE)
-
-
-
-
-
-
-
-
-
-
-
-
-def remove_all_hooks(model: torch.nn.Module) -> None:
-    for name, child in model._modules.items():
-        if child is not None:
-            if hasattr(child, "_forward_hooks"):
-                child._forward_hooks: Dict[int, Callable] = OrderedDict()
-            elif hasattr(child, "_forward_pre_hooks"):
-                child._forward_pre_hooks: Dict[int, Callable] = OrderedDict()
-            elif hasattr(child, "_backward_hooks"):
-                child._backward_hooks: Dict[int, Callable] = OrderedDict()
-            remove_all_hooks(child)
-
-remove_all_hooks(pipe.text_encoder)
-remove_all_hooks(pipe.unet)
-
-emb_len = 1280
-
-STEPS = 8
-
-
-from torchvision.transforms import PILToTensor
-from PIL import Image
-
-
-# TODO have an actual patch instead of forward hooks lol
-prevs_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'latest_user_to_rate', 'from_user_id'])
-counter = 0
-activation = []
-our_guy = 0 * torch.randn(1, emb_len)
-w = 0
-
-def sd_get_in_activation():
-    def hook(model, input, output):
-        global counter
-        global activation
-        global our_guy
-        
-        #if counter == 'ayo':
-        #    activation = output[1].mean(0)[None].to('cpu').to(torch.float32)
-        #    return
-        
-        counter += 1
-        if counter < 2:
-            return output
-        else:
-            print('w', w)
-            if w != 0:
-                output[1, :] = output[1, :] + our_guy.to('cuda') * w
-        activation = output[1].mean(0)[None].to('cpu').to(torch.float32)
-
-        return output
-    return hook
-
-pipe.unet.mid_block.attentions[0].transformer_blocks[0].attn2.register_forward_hook(sd_get_in_activation())
+#pipe.enable_free_init(method="gaussian", use_fast_sampling=True)
 
 pipe.to(device=DEVICE)
-
-
-#ip_em = torch.load('/home/ryn_mote/Misc/linear_probe/1708230329.2274947.pt').view(1, 1, 1, emb_len).to(dtype=dtype, device=DEVICE)
-
-# should already be...
-#@torch.no_grad()
-#def get_img_attentions(img):
-#    img = PILToTensor()(img.resize((512, 512))) / 255 * 2 - 1 # TODO verify -1, 1 for VAE
-#    img = img[None]
-#    img = torch.cat([pipe.vae.config.scaling_factor * pipe.vae.encode(
-#        i.unsqueeze(0).to(device='cuda', dtype=dtype)).latent_dist.sample().unsqueeze(2).repeat(1, 1, 16, 1, 1) for i in img])
-
-#    t = torch.tensor(300).long()
-#    noisedim = pipe.scheduler.add_noise(img, torch.randn_like(img), t)
-#    input_ids = pipe.tokenizer('the scene', return_tensors='pt').to('cuda')
-#    tembs = pipe.text_encoder(**input_ids)[0]
-#    o = pipe.unet(noisedim, t, encoder_hidden_states=tembs, added_cond_kwargs={'image_embeds': ip_em})
-
-#get_img_attentions(Image.open('/home/ryn_mote/Pictures/Pills-that-make-you-stare-at-meme-3.jpg'))
-
+#pipe.unet = torch.compile(pipe.unet)
+#pipe.vae = torch.compile(pipe.vae)
 
 @spaces.GPU()
-def generate_gpu(in_im_embs, prompt='the scene'):
-    global activation
-    global our_guy
-    global counter
+def generate_gpu(in_im_embs):
+    in_im_embs = in_im_embs.to('cuda').unsqueeze(0).unsqueeze(0)
+    output = pipe(prompt='art', guidance_scale=0, added_cond_kwargs={}, ip_adapter_image_embeds=[in_im_embs], num_inference_steps=STEPS)
+    im_emb, _ = pipe.encode_image(
+                output.frames[0][len(output.frames[0])//2], 'cuda', 1, output_hidden_state
+            )
+    im_emb = im_emb.detach().to('cpu').to(torch.float32)
+    return output, im_emb
 
-    counter = 0
-    our_guy = in_im_embs
+
+def generate(in_im_embs):
+    output, im_emb = generate_gpu(in_im_embs)
+    nsfw = maybe_nsfw(output.frames[0][len(output.frames[0])//2])
     
-    output = pipe(prompt=prompt, guidance_scale=1., num_inference_steps=STEPS,)[0][0]
-    
-    # we try to get the first frame's activations
-    #counter = 'ayo'
-    #get_img_attentions(output[0])
-    print('image is made')
-    return output
-
-
-def generate(in_im_embs, prompt='', set_path=None):
-    output = generate_gpu(in_im_embs, prompt)
-    # TODO put back
-    nsfw = False#maybe_nsfw(output.frames[0][len(output.frames[0])//2])
-    if set_path is None:
-        name = str(uuid.uuid4()).replace("-", "")
-        path = f"/tmp/{name}.mp4"
-    else:
-        path = set_path
+    name = str(uuid.uuid4()).replace("-", "")
+    path = f"/tmp/{name}.mp4"
     
     if nsfw:
         gr.Warning("NSFW content detected.")
         # TODO could return an automatic dislike of auto dislike on the backend for neither as well; just would need refactoring.
-        return None
+        return None, im_emb
     
     
-    output = output + list(reversed(output))
+    output.frames[0] = output.frames[0] + list(reversed(output.frames[0]))
 
-    write_video(path, output)
-    return path
+    write_video(path, output.frames[0])
+    return path, im_emb
 
 
 #######################
 
 def get_user_emb(embs, ys):
-
-
-    print('Gathering coefficients')
     # handle case where every instance of calibration videos is 'Neither' or 'Like' or 'Dislike'
-    if len(list(set(ys))) <= 1:
-        embs.append(.01*torch.randn(1, emb_len))
-        embs.append(.01*torch.randn(1, emb_len))
-        ys.append(0)
-        ys.append(1)
-        print('Fixing only one feedback class available.\n')
+    if len(list(ys)) <= 7:
+        aways = [.01*torch.randn(1280) for i in range(3)]
+        embs += aways
+        awal = [0 for i in range(3)]
+        ys += awal
     
-    indices = list(range(len(ys)))
+    indices = list(range(len(embs)))
+    # sample only as many negatives as there are positives
     pos_indices = [i for i in indices if ys[i] == 1]
     neg_indices = [i for i in indices if ys[i] == 0]
-    print(len(neg_indices), len(pos_indices))
+    #lower = min(len(pos_indices), len(neg_indices))
+    #neg_indices = random.sample(neg_indices, lower)
+    #pos_indices = random.sample(pos_indices, lower)
     
     
     # we may have just encountered a rare multi-threading diffusers issue (https://github.com/huggingface/diffusers/issues/5749);
@@ -280,42 +180,34 @@ def get_user_emb(embs, ys):
         print('ys are longer than embs; popping latest rating')
         ys.pop(-1)
     
-    feature_embs = torch.cat([embs[i].to('cpu') for i in indices])
-    feature_embs = feature_embs / feature_embs.norm(-1, keepdim=True)
+    feature_embs = torch.stack([embs[i].squeeze().to('cpu') for i in indices]).to('cpu')
     #scaler = preprocessing.StandardScaler().fit(feature_embs)
     #feature_embs = scaler.transform(feature_embs)
-#     chosen_y = np.array([ys[i] for i in indices])
+    chosen_y = np.array([ys[i] for i in indices])
     
-    lin_class = SVC(max_iter=20, kernel='linear', C=.1, class_weight='balanced').fit(feature_embs, ys)
-    direction = torch.tensor(lin_class.coef_, dtype=torch.float32).detach().to('cpu')[0]
+    if feature_embs.norm() != 0:
+        feature_embs = feature_embs / feature_embs.norm()
     
-    embs = torch.cat(embs)
-    # direction scaling from https://github.com/saprmarks/geometry-of-truth/blob/main/probes.py
-    true_acts, false_acts = embs[torch.tensor(ys)==1], embs[torch.tensor(ys)==0]
-    true_mean, false_mean = true_acts[:4].mean(0), false_acts[:4].mean(0)
-    direction = direction / (direction.norm())
-    direction.to('cpu')
-    diff = (true_mean - false_mean) @ direction
-    direction = diff * direction
-    
-    coef_ = direction.unsqueeze(0)
-    im_emb = coef_.to(dtype=dtype)
-    
-    print('Gathered')
+    #lin_class = Ridge(fit_intercept=False).fit(feature_embs, chosen_y)
+    lin_class = SVC(max_iter=20, kernel='linear', C=.1, class_weight='balanced').fit(feature_embs, chosen_y)
+    coef_ = torch.tensor(lin_class.coef_, dtype=torch.double).detach().to('cpu')
+    coef_ = coef_ / coef_.abs().max() * 3
+
+    w = 1# if len(embs) % 2 == 0 else 0
+    im_emb = w * coef_.to(dtype=dtype)
     return im_emb
 
 
 def pluck_img(user_id, user_emb):
-    print(user_id, 'user_id')
     not_rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, 'gone') == 'gone' for i in prevs_df.iterrows()]]
     while len(not_rated_rows) == 0:
         not_rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, 'gone') == 'gone' for i in prevs_df.iterrows()]]
-        time.sleep(.1)
+        time.sleep(.001)
     # TODO optimize this lol
-    best_sim = -10000000
+    best_sim = -100000
     for i in not_rated_rows.iterrows():
         # TODO sloppy .to but it is 3am.
-        sim = torch.cosine_similarity(i[1]['embeddings'].detach().to('cpu'), user_emb.detach().to('cpu'), -1)
+        sim = torch.cosine_similarity(i[1]['embeddings'].detach().to('cpu'), user_emb.detach().to('cpu'))
         if sim > best_sim:
             best_sim = sim
             best_row = i[1]
@@ -324,7 +216,6 @@ def pluck_img(user_id, user_emb):
 
 
 def background_next_image():
-        global our_guy
         global prevs_df
         # only let it get N (maybe 3) ahead of the user
         #not_rated_rows = prevs_df[[i[1]['user:rating'] == {' ': ' '} for i in prevs_df.iterrows()]]
@@ -333,8 +224,6 @@ def background_next_image():
         #    not_rated_rows = prevs_df[[i[1]['user:rating'] == {' ': ' '} for i in prevs_df.iterrows()]]
             rated_rows = prevs_df[[i[1]['user:rating'] != {' ': ' '} for i in prevs_df.iterrows()]]
             time.sleep(.01)
-            # TODO sleep less
-#             print('all users have 4 or less rows rated')
 
         user_id_list = set(rated_rows['latest_user_to_rate'].to_list())
         for uid in user_id_list:
@@ -355,64 +244,54 @@ def background_next_image():
             if len(unrated_from_user) >= 10:
                 continue
             
-            if len(rated_rows) < 6:
-                print(f'latest user {uid} has < 6 rows') # or > 7 unrated rows')
+            if len(rated_rows) < 4:
+                print(f'latest user {uid} has < 4 rows') # or > 7 unrated rows')
                 continue
             
-            print(uid)
             embs, ys = pluck_embs_ys(uid)
             
             user_emb = get_user_emb(embs, ys)
-            our_guy = user_emb
-            img = generate(user_emb, prompt='a scene')
-            embs = activation
-
+            img, embs = generate(user_emb)
             if img:
                 tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'latest_user_to_rate'])
                 tmp_df['paths'] = [img]
-                tmp_df['embeddings'] = (embs,)
+                tmp_df['embeddings'] = [embs]
                 tmp_df['user:rating'] = [{' ': ' '}]
                 tmp_df['from_user_id'] = [uid]
                 prevs_df = pd.concat((prevs_df, tmp_df))
-
-
                 # we can free up storage by deleting the image
-                if len(prevs_df) > 30:
-                    cands = prevs_df.iloc[6:]
-                    cands['sum_bad_ratings'] = [sum([int(t==0) for t in i.values()]) for i in cands['user:rating']]
-                    worst_row = cands.loc[cands['sum_bad_ratings']==cands['sum_bad_ratings'].max()].iloc[0]
-                    worst_path = worst_row['paths']
-                    print('Removing worst row:', worst_row, 'from prevs_df of len', len(prevs_df))
-                    if os.path.isfile(worst_path):
-                        os.remove(worst_path)
+                if len(prevs_df) > 50:
+                    oldest_path = prevs_df.iloc[6]['paths']
+                    if os.path.isfile(oldest_path):
+                        os.remove(oldest_path)
                     else:
                         # If it fails, inform the user.
-                        print("Error: %s file not found" % worst_path)
-
-                    # only keep x images & embeddings & ips, then remove the most often disliked besides calibrating
-                    prevs_df = prevs_df[prevs_df['paths'] != worst_path]
-                    print('prevs_df is now length:', len(prevs_df))
+                        print("Error: %s file not found" % oldest_path)
+                    # only keep 50 images & embeddings & ips, then remove oldest besides calibrating
+                    prevs_df = pd.concat((prevs_df.iloc[:6], prevs_df.iloc[7:]))
     
-
 
 def pluck_embs_ys(user_id):
     rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, None) != None for i in prevs_df.iterrows()]]
+    #not_rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, None) == None for i in prevs_df.iterrows()]]
+    #while len(not_rated_rows) == 0:
+    #    not_rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, None) == None for i in prevs_df.iterrows()]]
+    #    rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, None) != None for i in prevs_df.iterrows()]]
+    #    time.sleep(.01)
+    #    print('current user has 0 not_rated_rows')
+    
     embs = rated_rows['embeddings'].to_list()
     ys = [i[user_id] for i in rated_rows['user:rating'].to_list()]
     return embs, ys
 
 def next_image(calibrate_prompts, user_id):
-    print(prevs_df)
-    
     with torch.no_grad():
         if len(calibrate_prompts) > 0:
-            print('######### Calibrating with sample media #########')
             cal_video = calibrate_prompts.pop(0)
             image = prevs_df[prevs_df['paths'] == cal_video]['paths'].to_list()[0]
             
             return image, calibrate_prompts
         else:
-            print('######### Roaming #########')
             embs, ys = pluck_embs_ys(user_id)
             user_emb = get_user_emb(embs, ys)
             image = pluck_img(user_id, user_emb)
@@ -458,11 +337,11 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
         print('NSFW -- choice is disliked')
         choice = 0
     
-    row_mask = [p.split('/')[-1].replace('.mp4', '') in img for p in prevs_df['paths'].to_list()]
+    row_mask = [p.split('/')[-1] in img for p in prevs_df['paths'].to_list()]
     # if it's still in the dataframe, add the choice
     if len(prevs_df.loc[row_mask, 'user:rating']) > 0:
         prevs_df.loc[row_mask, 'user:rating'][0][user_id] = choice
-        prevs_df.loc[row_mask, 'latest_user_to_rate'] = user_id
+        prevs_df.loc[row_mask, 'latest_user_to_rate'] = [user_id]
     img, calibrate_prompts = next_image(calibrate_prompts, user_id)
     return img, calibrate_prompts
 
@@ -527,12 +406,12 @@ Explore the latent space without text prompts based on your preferences. Learn m
     user_id = gr.State()
     # calibration videos -- this is a misnomer now :D
     calibrate_prompts = gr.State([
-    './a painting of the land.mp4',
-    './gorgeous weeping tree.mp4',
-    './the ocean.mp4',
-    './the skyline with neon.mp4',
-    './a jellyfish.mp4',
-    './still life in blue.mp4',
+    './first.mp4',
+    './second.mp4',
+    './third.mp4',
+    './fourth.mp4',
+    './fifth.mp4',
+    './sixth.mp4',
     ])
     def l():
         return None
@@ -586,33 +465,38 @@ log = logging.getLogger('log_here')
 log.setLevel(logging.ERROR)
 
 scheduler = BackgroundScheduler()
-scheduler.add_job(func=background_next_image, trigger="interval", seconds=1)
+scheduler.add_job(func=background_next_image, trigger="interval", seconds=.1)
 scheduler.start()
 
 #thread = threading.Thread(target=background_next_image,)
 #thread.start()
 
+# TODO shouldn't call this before gradio launch, yeah?
+@spaces.GPU()
+def encode_space(x):
+    im_emb, _ = pipe.encode_image(
+                image, DEVICE, 1, output_hidden_state
+            )
+    return im_emb.detach().to('cpu').to(torch.float32)
+
 # prep our calibration prompts
 for im in [
-    './a painting of the land.mp4',
-    './gorgeous weeping tree.mp4',
-    './the ocean.mp4',
-    './the skyline with neon.mp4',
-    './a jellyfish.mp4',
-    './still life in blue.mp4',
+    './first.mp4',
+    './second.mp4',
+    './third.mp4',
+    './fourth.mp4',
+    './fifth.mp4',
+    './sixth.mp4',
     ]:
-    #counter = 'ayo'
-    pth = generate(in_im_embs=0*torch.randn(1, emb_len), prompt=im.replace('.mp4', ''), set_path=im)
     tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating'])
-    tmp_df['paths'] = (im,)
-    image = list(imageio.imiter(pth))
+    tmp_df['paths'] = [im]
+    image = list(imageio.imiter(im))
     image = image[len(image)//2]
-    tmp_df['embeddings'] = (activation,)
+    im_emb = encode_space(image)
+
+    tmp_df['embeddings'] = [im_emb.detach().to('cpu')]
     tmp_df['user:rating'] = [{' ': ' '}]
     prevs_df = pd.concat((prevs_df, tmp_df))
-    print(prevs_df)
-
-w = 100
-demo.launch(share=True, debug=True)
 
 
+demo.launch(share=True)
