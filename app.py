@@ -32,7 +32,7 @@ import threading
 import random
 import time
 from PIL import Image
-from safety_checker_improved import maybe_nsfw
+#from safety_checker_improved import maybe_nsfw
 
 
 torch.set_grad_enabled(False)
@@ -116,7 +116,7 @@ pipe.fuse_lora()
 
 pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15_vit-G.bin", map_location='cpu')
 # This IP adapter improves outputs substantially.
-pipe.set_ip_adapter_scale(1.)
+pipe.set_ip_adapter_scale(.8)
 pipe.unet.fuse_qkv_projections()
 #pipe.enable_free_init(method="gaussian", use_fast_sampling=True)
 
@@ -127,7 +127,7 @@ pipe.to(device=DEVICE)
 @spaces.GPU()
 def generate_gpu(in_im_embs):
     in_im_embs = in_im_embs.to('cuda').unsqueeze(0).unsqueeze(0)
-    output = pipe(prompt='art', guidance_scale=0, added_cond_kwargs={}, ip_adapter_image_embeds=[in_im_embs], num_inference_steps=STEPS)
+    output = pipe(prompt='the scene', guidance_scale=1, added_cond_kwargs={}, ip_adapter_image_embeds=[in_im_embs], num_inference_steps=STEPS)
     im_emb, _ = pipe.encode_image(
                 output.frames[0][len(output.frames[0])//2], 'cuda', 1, output_hidden_state
             )
@@ -137,7 +137,7 @@ def generate_gpu(in_im_embs):
 
 def generate(in_im_embs):
     output, im_emb = generate_gpu(in_im_embs)
-    nsfw = maybe_nsfw(output.frames[0][len(output.frames[0])//2])
+    nsfw =False# TODO maybe_nsfw(output.frames[0][len(output.frames[0])//2])
     
     name = str(uuid.uuid4()).replace("-", "")
     path = f"/tmp/{name}.mp4"
@@ -190,8 +190,10 @@ def get_user_emb(embs, ys):
     
     #lin_class = Ridge(fit_intercept=False).fit(feature_embs, chosen_y)
     lin_class = SVC(max_iter=20, kernel='linear', C=.1, class_weight='balanced').fit(feature_embs, chosen_y)
-    coef_ = torch.tensor(lin_class.coef_, dtype=torch.double).detach().to('cpu')
+    coef_ = torch.tensor(lin_class.coef_, dtype=torch.float32).detach().to('cpu')
     coef_ = coef_ / coef_.abs().max() * 3
+
+
 
     w = 1# if len(embs) % 2 == 0 else 0
     im_emb = w * coef_.to(dtype=dtype)
@@ -236,16 +238,16 @@ def background_next_image():
             unrated_from_user = not_rated_rows[[i[1]['from_user_id'] == uid for i in not_rated_rows.iterrows()]]
             rated_from_user = rated_rows[[i[1]['from_user_id'] == uid for i in rated_rows.iterrows()]]
 
-            # we pop previous ratings if there are > 10
-            if len(rated_from_user) >= 10:
+            # we pop previous ratings if there are > n
+            if len(rated_from_user) >= 15:
                 oldest = rated_from_user.iloc[0]['paths']
                 prevs_df = prevs_df[prevs_df['paths'] != oldest]
-            # we don't compute more after 10 are in the queue for them
+            # we don't compute more after n are in the queue for them
             if len(unrated_from_user) >= 10:
                 continue
             
-            if len(rated_rows) < 4:
-                print(f'latest user {uid} has < 4 rows') # or > 7 unrated rows')
+            if len(rated_rows) < 5:
+                print(f'current looped user {uid} has < 4 rows') # or > 7 unrated rows')
                 continue
             
             embs, ys = pluck_embs_ys(uid)
@@ -260,7 +262,7 @@ def background_next_image():
                 tmp_df['from_user_id'] = [uid]
                 prevs_df = pd.concat((prevs_df, tmp_df))
                 # we can free up storage by deleting the image
-                if len(prevs_df) > 50:
+                if len(prevs_df) > 500:
                     oldest_path = prevs_df.iloc[6]['paths']
                     if os.path.isfile(oldest_path):
                         os.remove(oldest_path)
@@ -479,7 +481,7 @@ def encode_space(x):
             )
     return im_emb.detach().to('cpu').to(torch.float32)
 
-# prep our calibration prompts
+# prep our calibration videos
 for im in [
     './first.mp4',
     './second.mp4',
@@ -487,6 +489,10 @@ for im in [
     './fourth.mp4',
     './fifth.mp4',
     './sixth.mp4',
+    './seventh.mp4',
+    './eigth.mp4',
+    './ninth.mp4',
+    './tenth.mp4',
     ]:
     tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating'])
     tmp_df['paths'] = [im]
@@ -499,4 +505,6 @@ for im in [
     prevs_df = pd.concat((prevs_df, tmp_df))
 
 
-demo.launch(share=True)
+demo.launch(share=True, server_port=8443)
+
+
