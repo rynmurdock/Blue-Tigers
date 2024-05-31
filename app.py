@@ -29,6 +29,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import sched
 import threading
 
+from gemma_portion import generate_gemm, get_gemb
+
 import random
 import time
 from PIL import Image
@@ -39,7 +41,7 @@ torch.set_grad_enabled(False)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
-prevs_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'latest_user_to_rate', 'from_user_id'])
+prevs_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'latest_user_to_rate', 'from_user_id', 'text', 'gemb'])
 
 import spaces
 start_time = time.time()
@@ -86,7 +88,7 @@ def imio_write_video(file_name, images, fps=15):
 
 image_encoder = CLIPVisionModelWithProjection.from_pretrained("h94/IP-Adapter", subfolder="sdxl_models/image_encoder", torch_dtype=dtype, 
 device_map='cuda')
-#vae = AutoencoderTiny.from_pretrained("madebyollin/taesd", torch_dtype=dtype)
+vae = AutoencoderTiny.from_pretrained("madebyollin/taesd", torch_dtype=dtype)
 
 # vae = ConsistencyDecoderVAE.from_pretrained("openai/consistency-decoder", torch_dtype=dtype)
 # vae = compile_unet(vae, config=config)
@@ -101,7 +103,8 @@ text_encoder = CLIPTextModel.from_pretrained('rynmurdock/Sea_Claws', subfolder='
 device_map='cpu').to(dtype)
 
 adapter = MotionAdapter.from_pretrained("wangfuyun/AnimateLCM")
-pipe = AnimateDiffPipeline.from_pretrained("runwayml/stable-diffusion-v1-5", motion_adapter=adapter, image_encoder=image_encoder, torch_dtype=dtype, unet=unet, text_encoder=text_encoder)
+pipe = AnimateDiffPipeline.from_pretrained("runwayml/stable-diffusion-v1-5", motion_adapter=adapter, image_encoder=image_encoder, torch_dtype=dtype,     
+                                            unet=unet, text_encoder=text_encoder, vae=vae)
 pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config, beta_schedule="linear")
 pipe.load_lora_weights("wangfuyun/AnimateLCM", weight_name="AnimateLCM_sd15_t2v_lora.safetensors", adapter_name="lcm-lora",)
 pipe.set_adapters(["lcm-lora"], [.9])
@@ -124,19 +127,25 @@ pipe.to(device=DEVICE)
 #pipe.unet = torch.compile(pipe.unet)
 #pipe.vae = torch.compile(pipe.vae)
 
+
+
+
+
+
 @spaces.GPU()
-def generate_gpu(in_im_embs):
-    in_im_embs = in_im_embs.to('cuda').unsqueeze(0).unsqueeze(0)
-    output = pipe(prompt='the scene', guidance_scale=1, added_cond_kwargs={}, ip_adapter_image_embeds=[in_im_embs], num_inference_steps=STEPS)
-    im_emb, _ = pipe.encode_image(
-                output.frames[0][len(output.frames[0])//2], 'cuda', 1, output_hidden_state
-            )
-    im_emb = im_emb.detach().to('cpu').to(torch.float32)
+def generate_gpu(in_im_embs, prompt='the scene'):
+    with torch.no_grad():
+        in_im_embs = in_im_embs.to('cuda').unsqueeze(0).unsqueeze(0)
+        output = pipe(prompt=prompt, guidance_scale=1, added_cond_kwargs={}, ip_adapter_image_embeds=[in_im_embs], num_inference_steps=STEPS)
+        im_emb, _ = pipe.encode_image(
+                    output.frames[0][len(output.frames[0])//2], 'cuda', 1, output_hidden_state
+                )
+        im_emb = im_emb.detach().to('cpu').to(torch.float32)
     return output, im_emb
 
 
-def generate(in_im_embs):
-    output, im_emb = generate_gpu(in_im_embs)
+def generate(in_im_embs, prompt='the scene'):
+    output, im_emb = generate_gpu(in_im_embs, prompt)
     nsfw =False# TODO maybe_nsfw(output.frames[0][len(output.frames[0])//2])
     
     name = str(uuid.uuid4()).replace("-", "")
@@ -193,8 +202,6 @@ def get_user_emb(embs, ys):
     coef_ = torch.tensor(lin_class.coef_, dtype=torch.float32).detach().to('cpu')
     coef_ = coef_ / coef_.abs().max() * 3
 
-
-
     w = 1# if len(embs) % 2 == 0 else 0
     im_emb = w * coef_.to(dtype=dtype)
     return im_emb
@@ -247,19 +254,29 @@ def background_next_image():
                 continue
             
             if len(rated_rows) < 5:
-                print(f'current looped user {uid} has < 4 rows') # or > 7 unrated rows')
                 continue
             
-            embs, ys = pluck_embs_ys(uid)
+            embs, ys, gembs = pluck_embs_ys(uid)
             
             user_emb = get_user_emb(embs, ys)
-            img, embs = generate(user_emb)
+            
+            gems = [g for g in gembs if isinstance(g, torch.Tensor)]
+            # need a way to get text in; could label videos. TODO TODO TODO
+            if len(gems) > 4:
+                new_gem = get_gemb(ys, gems)
+                text, gembs = generate_gemm(in_embs=new_gem)
+            else:
+                text, gembs = generate_gemm(in_embs=torch.zeros(1, 2048))
+            img, embs = generate(user_emb, text)
+            
             if img:
-                tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'latest_user_to_rate'])
+                tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'latest_user_to_rate', 'text', 'gemb'])
                 tmp_df['paths'] = [img]
                 tmp_df['embeddings'] = [embs]
                 tmp_df['user:rating'] = [{' ': ' '}]
                 tmp_df['from_user_id'] = [uid]
+                tmp_df['text'] = [text]
+                tmp_df['gemb'] = [gembs]
                 prevs_df = pd.concat((prevs_df, tmp_df))
                 # we can free up storage by deleting the image
                 if len(prevs_df) > 500:
@@ -284,7 +301,8 @@ def pluck_embs_ys(user_id):
     
     embs = rated_rows['embeddings'].to_list()
     ys = [i[user_id] for i in rated_rows['user:rating'].to_list()]
-    return embs, ys
+    gembs = rated_rows['gemb'].to_list()
+    return embs, ys, gembs
 
 def next_image(calibrate_prompts, user_id):
     with torch.no_grad():
@@ -294,7 +312,7 @@ def next_image(calibrate_prompts, user_id):
             
             return image, calibrate_prompts
         else:
-            embs, ys = pluck_embs_ys(user_id)
+            embs, ys, gembs = pluck_embs_ys(user_id)
             user_emb = get_user_emb(embs, ys)
             image = pluck_img(user_id, user_emb)
             return image, calibrate_prompts
@@ -494,7 +512,7 @@ for im in [
     './ninth.mp4',
     './tenth.mp4',
     ]:
-    tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating'])
+    tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'text', 'gemb'])
     tmp_df['paths'] = [im]
     image = list(imageio.imiter(im))
     image = image[len(image)//2]
