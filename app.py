@@ -86,7 +86,7 @@ def imio_write_video(file_name, images, fps=15):
 
 image_encoder = CLIPVisionModelWithProjection.from_pretrained("h94/IP-Adapter", subfolder="sdxl_models/image_encoder", torch_dtype=dtype, 
 device_map='cuda')
-vae = AutoencoderTiny.from_pretrained("madebyollin/taesd", torch_dtype=dtype)
+#vae = AutoencoderTiny.from_pretrained("madebyollin/taesd", torch_dtype=dtype)
 
 # vae = ConsistencyDecoderVAE.from_pretrained("openai/consistency-decoder", torch_dtype=dtype)
 # vae = compile_unet(vae, config=config)
@@ -102,7 +102,7 @@ device_map='cpu').to(dtype)
 
 adapter = MotionAdapter.from_pretrained("wangfuyun/AnimateLCM")
 pipe = AnimateDiffPipeline.from_pretrained("runwayml/stable-diffusion-v1-5", motion_adapter=adapter, image_encoder=image_encoder, torch_dtype=dtype,     
-                                            unet=unet, text_encoder=text_encoder, vae=vae)
+                                            unet=unet, text_encoder=text_encoder)
 pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config, beta_schedule="linear")
 pipe.load_lora_weights("wangfuyun/AnimateLCM", weight_name="AnimateLCM_sd15_t2v_lora.safetensors", adapter_name="lcm-lora",)
 pipe.set_adapters(["lcm-lora"], [.9])
@@ -117,7 +117,7 @@ pipe.fuse_lora()
 
 pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15_vit-G.bin", map_location='cpu')
 # This IP adapter improves outputs substantially.
-pipe.set_ip_adapter_scale(.6)
+pipe.set_ip_adapter_scale(.8)
 pipe.unet.fuse_qkv_projections()
 #pipe.enable_free_init(method="gaussian", use_fast_sampling=True)
 
@@ -220,7 +220,8 @@ def pluck_img(user_id, user_emb):
             best_sim = sim
             best_row = i[1]
     img = best_row['paths']
-    return img
+    text = best_row.get('text', '')
+    return img, text
 
 
 def background_next_image():
@@ -309,12 +310,12 @@ def next_image(calibrate_prompts, user_id):
             cal_video = calibrate_prompts.pop(0)
             image = prevs_df[prevs_df['paths'] == cal_video]['paths'].to_list()[0]
             
-            return image, calibrate_prompts
+            return image, calibrate_prompts, ''
         else:
             embs, ys, gembs = pluck_embs_ys(user_id)
             user_emb = get_user_emb(embs, ys)
-            image = pluck_img(user_id, user_emb)
-            return image, calibrate_prompts
+            image, text = pluck_img(user_id, user_emb)
+            return image, calibrate_prompts, text
 
 
 
@@ -326,7 +327,7 @@ def next_image(calibrate_prompts, user_id):
 
 def start(_, calibrate_prompts, user_id, request: gr.Request):
     user_id = int(str(time.time())[-7:].replace('.', ''))
-    image, calibrate_prompts = next_image(calibrate_prompts, user_id)
+    image, calibrate_prompts, text = next_image(calibrate_prompts, user_id)
     return [
             gr.Button(value='Like (L)', interactive=True), 
             gr.Button(value='Neither (Space)', interactive=True, visible=False), 
@@ -345,7 +346,7 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
     if choice == 'Like (L)':
         choice = 1
     elif choice == 'Neither (Space)':
-        img, calibrate_prompts = next_image(calibrate_prompts, user_id)
+        img, calibrate_prompts, text = next_image(calibrate_prompts, user_id)
         return img, calibrate_prompts
     else:
         choice = 0
@@ -361,8 +362,8 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
     if len(prevs_df.loc[row_mask, 'user:rating']) > 0:
         prevs_df.loc[row_mask, 'user:rating'][0][user_id] = choice
         prevs_df.loc[row_mask, 'latest_user_to_rate'] = [user_id]
-    img, calibrate_prompts = next_image(calibrate_prompts, user_id)
-    return img, calibrate_prompts
+    img, calibrate_prompts, text = next_image(calibrate_prompts, user_id)
+    return img, calibrate_prompts, text
 
 css = '''.gradio-container{max-width: 700px !important}
 #description{text-align: center}
@@ -435,6 +436,8 @@ Explore the latent space without text prompts based on your preferences. Learn m
     def l():
         return None
 
+    with gr.Row():
+        text = gr.Textbox(interactive=False, visible=False)
     with gr.Row(elem_id='output-image'):
         img = gr.Video(
         label='Lightning',
@@ -453,17 +456,17 @@ Explore the latent space without text prompts based on your preferences. Learn m
         b1.click(
         choose, 
         [img, b1, calibrate_prompts, user_id],
-        [img, calibrate_prompts],
+        [img, calibrate_prompts, text],
         )
         b2.click(
         choose, 
         [img, b2, calibrate_prompts, user_id],
-        [img, calibrate_prompts],
+        [img, calibrate_prompts, text],
         )
         b3.click(
         choose, 
         [img, b3, calibrate_prompts, user_id],
-        [img, calibrate_prompts],
+        [img, calibrate_prompts, text],
         )
     with gr.Row():
         b4 = gr.Button(value='Start')

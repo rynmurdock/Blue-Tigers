@@ -1067,7 +1067,7 @@ def get_gemb(ys, embs):
     im_emb = coef_.to(dtype=dtype)
     return im_emb.to(torch.float32)
 
-def generate_gemm(prompt='a description:', in_embs=torch.zeros(1, 1, 2048),):
+def generate_gemm(prompt='a description of the scene:', in_embs=torch.zeros(1, 1, 2048),):
   global final_act
   prompt = tokenizer(prompt, return_tensors="pt").to("cuda").input_ids
   final_act = in_embs.squeeze()[None, None, :].to(device='cuda', dtype=dtype)
