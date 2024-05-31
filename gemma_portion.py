@@ -1018,7 +1018,9 @@ def _sample(
     return input_ids, new_activations
     
     
-    
+from sklearn.svm import SVC
+from sklearn import preprocessing
+import numpy as np
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
@@ -1031,7 +1033,7 @@ dtype=torch.bfloat16
 torch.set_float32_matmul_precision('high')
 
 EMB_LEN = 2048
-gemm.pluck_layer = 7
+gemm.pluck_layer = 4
 
 final_act = 0
 
@@ -1059,8 +1061,8 @@ def get_gemb(ys, embs):
     chosen_y = np.array([ys[i] for i in indices])
 
     lin_class = SVC(max_iter=50000, kernel='linear', class_weight='balanced', C=.1).fit(feature_embs, chosen_y)
-    coef_ = torch.tensor(lin_class.coef_, dtype=torch.double)
-    coef_ = coef_ / coef_.abs().max() * 1.4
+    coef_ = torch.tensor(lin_class.coef_)
+    coef_ = coef_ / coef_.abs().max() * 1.7
 
     im_emb = coef_.to(dtype=dtype)
     return im_emb.to(torch.float32)
@@ -1071,9 +1073,7 @@ def generate_gemm(prompt='a description:', in_embs=torch.zeros(1, 1, 2048),):
   final_act = in_embs.squeeze()[None, None, :].to(device='cuda', dtype=dtype)
   text, in_embs = gemm.generate(prompt, 
                                  probe_direction=in_embs.squeeze()[None, None, :].to(device='cuda', dtype=dtype),
-                                 do_sample=True, top_p=.97, max_new_tokens=20)
+                                 do_sample=True, top_p=.97, temperature=1.2, max_new_tokens=20)
   text = tokenizer.decode(text[0])
-  
-  plt.show()
   return text, torch.cat(in_embs[1:], 1).mean(1).to('cpu').to(torch.float32)
 

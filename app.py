@@ -15,14 +15,12 @@ import matplotlib.pyplot as plt
 import matplotlib
 import logging
 
-from sklearn.linear_model import Ridge
 
 import os
 import imageio
 import gradio as gr
 import numpy as np
 from sklearn.svm import SVC
-from sklearn.inspection import permutation_importance
 from sklearn import preprocessing
 import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -34,7 +32,7 @@ from gemma_portion import generate_gemm, get_gemb
 import random
 import time
 from PIL import Image
-#from safety_checker_improved import maybe_nsfw
+from safety_checker_improved import maybe_nsfw
 
 
 torch.set_grad_enabled(False)
@@ -119,7 +117,7 @@ pipe.fuse_lora()
 
 pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15_vit-G.bin", map_location='cpu')
 # This IP adapter improves outputs substantially.
-pipe.set_ip_adapter_scale(.8)
+pipe.set_ip_adapter_scale(.6)
 pipe.unet.fuse_qkv_projections()
 #pipe.enable_free_init(method="gaussian", use_fast_sampling=True)
 
@@ -135,6 +133,7 @@ pipe.to(device=DEVICE)
 @spaces.GPU()
 def generate_gpu(in_im_embs, prompt='the scene'):
     with torch.no_grad():
+        print(prompt)
         in_im_embs = in_im_embs.to('cuda').unsqueeze(0).unsqueeze(0)
         output = pipe(prompt=prompt, guidance_scale=1, added_cond_kwargs={}, ip_adapter_image_embeds=[in_im_embs], num_inference_steps=STEPS)
         im_emb, _ = pipe.encode_image(
@@ -146,7 +145,7 @@ def generate_gpu(in_im_embs, prompt='the scene'):
 
 def generate(in_im_embs, prompt='the scene'):
     output, im_emb = generate_gpu(in_im_embs, prompt)
-    nsfw =False# TODO maybe_nsfw(output.frames[0][len(output.frames[0])//2])
+    nsfw =maybe_nsfw(output.frames[0][len(output.frames[0])//2])
     
     name = str(uuid.uuid4()).replace("-", "")
     path = f"/tmp/{name}.mp4"
