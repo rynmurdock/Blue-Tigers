@@ -312,7 +312,7 @@ def background_next_image():
             print(embs, 'embs', len(embs))
             
             if len(gembs) > 4:
-                user_gem = get_user_emb(gembs, ys) / 3
+                user_gem = get_user_emb(gembs, ys) / 7
                 text = generate_pali(user_gem)
             else:
                 text = generate_pali(torch.zeros(1, 1152))
@@ -397,7 +397,7 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
     elif choice == 'Neither (Space)':
         img, calibrate_prompts, text = next_image(calibrate_prompts, user_id)
         text = ''
-        return img, calibrate_prompts
+        return img, calibrate_prompts, text
     else:
         choice = 0
     
@@ -487,7 +487,7 @@ Explore the latent space without text prompts based on your preferences. Learn m
         return None
 
     with gr.Row():
-        text = gr.Textbox(interactive=False, visible=True)
+        text = gr.Textbox(interactive=False, visible=True, label='Text')
     with gr.Row(elem_id='output-image'):
         img = gr.Video(
         label='Lightning',
