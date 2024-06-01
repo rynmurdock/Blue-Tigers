@@ -150,7 +150,7 @@ def to_wanted_embs(image_outputs, input_ids, attention_mask, cache_position=None
 
 
 def generate_pali(user_emb):
-    prompt = 'answer en What is in this scene?'
+    prompt = 'caption en'
     model_inputs = processor(text=prompt, images=torch.zeros(1, 3, 224, 224), return_tensors="pt")
     # we need to get im_embs taken in here.
     input_len = model_inputs["input_ids"].shape[-1]
@@ -158,9 +158,8 @@ def generate_pali(user_emb):
                         model_inputs["input_ids"].to(device), 
                         model_inputs["attention_mask"].to(device))
 
-    generation = pali.generate(max_new_tokens=20, do_sample=True, top_p=.98, inputs_embeds=input_embeds)
-    generation = generation[0]
-    decoded = processor.decode(generation, skip_special_tokens=True)
+    generation = pali.generate(max_new_tokens=100, do_sample=True, top_p=.94, temperature=1.2, inputs_embeds=input_embeds)
+    decoded = processor.decode(generation[0], skip_special_tokens=True, clean_up_tokenization_spaces=True)
     return decoded
 
 
@@ -173,7 +172,6 @@ def generate_pali(user_emb):
 @spaces.GPU()
 def generate_gpu(in_im_embs, prompt='the scene'):
     with torch.no_grad():
-        print(prompt)
         in_im_embs = in_im_embs.to('cuda').unsqueeze(0).unsqueeze(0)
         output = pipe(prompt=prompt, guidance_scale=1, added_cond_kwargs={}, ip_adapter_image_embeds=[in_im_embs], num_inference_steps=STEPS)
         im_emb, _ = pipe.encode_image(
@@ -184,15 +182,13 @@ def generate_gpu(in_im_embs, prompt='the scene'):
         im = torch.nn.functional.interpolate(im, (224, 224))
         im = (im - .5) * 2
         gemb = pali.vision_tower(im.to(device).to(dtype)).last_hidden_state.detach().to('cpu').to(torch.float32).mean(1)
-        print(gemb, 'gemb')
     return output, im_emb, gemb
 
 
 def generate(in_im_embs, prompt='the scene'):
-    print(prompt)
     output, im_emb, gemb = generate_gpu(in_im_embs, prompt)
     nsfw =maybe_nsfw(output.frames[0][len(output.frames[0])//2])
-    
+    print(prompt)
     name = str(uuid.uuid4()).replace("-", "")
     path = f"/tmp/{name}.mp4"
     
@@ -306,13 +302,9 @@ def background_next_image():
             embs, ys, gembs = pluck_embs_ys(uid)
             
             user_emb = get_user_emb(embs, ys)
-            
-            print(gembs, 'gems', len(gembs))
-            print(ys, 'ys', len(ys))
-            print(embs, 'embs', len(embs))
-            
+                        
             if len(gembs) > 4:
-                user_gem = get_user_emb(gembs, ys) / 7
+                user_gem = get_user_emb(gembs, ys) / 4 # TODO scale this correctly; matplotlib, etc.
                 text = generate_pali(user_gem)
             else:
                 text = generate_pali(torch.zeros(1, 1152))
@@ -396,7 +388,6 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
         choice = 1
     elif choice == 'Neither (Space)':
         img, calibrate_prompts, text = next_image(calibrate_prompts, user_id)
-        text = ''
         return img, calibrate_prompts, text
     else:
         choice = 0
