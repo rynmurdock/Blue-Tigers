@@ -150,7 +150,7 @@ def to_wanted_embs(image_outputs, input_ids, attention_mask, cache_position=None
 
 
 def generate_pali(user_emb):
-    prompt = 'answer en what is this?'
+    prompt = 'answer en What is this?'
     model_inputs = processor(text=prompt, images=torch.zeros(1, 3, 224, 224), return_tensors="pt")
     # we need to get im_embs taken in here.
     input_len = model_inputs["input_ids"].shape[-1]
