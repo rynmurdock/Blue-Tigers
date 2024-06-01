@@ -27,8 +27,6 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import sched
 import threading
 
-from gemma_portion import generate_gemm, get_gemb
-
 import random
 import time
 from PIL import Image
@@ -53,6 +51,7 @@ from PIL import Image
 from transformers import CLIPVisionModelWithProjection
 import uuid
 import av
+import torchvision
 
 def write_video(file_name, images, fps=17):
     container = av.open(file_name, mode="w")
@@ -126,7 +125,48 @@ pipe.to(device=DEVICE)
 #pipe.vae = torch.compile(pipe.vae)
 
 
+#############################################################
 
+from transformers import AutoProcessor, PaliGemmaForConditionalGeneration, BitsAndBytesConfig
+
+quantization_config = BitsAndBytesConfig(load_in_4bit=True)
+pali = PaliGemmaForConditionalGeneration.from_pretrained('google/paligemma-3b-pt-224', token='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', torch_dtype=dtype, quantization_config=quantization_config).eval()
+processor = AutoProcessor.from_pretrained('google/paligemma-3b-pt-224', token='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')
+
+
+
+def to_wanted_embs(image_outputs, input_ids, attention_mask, cache_position=None):
+    inputs_embeds = pali.get_input_embeddings()(input_ids)
+    selected_image_feature = image_outputs.to(dtype).to(device)
+    image_features = pali.multi_modal_projector(selected_image_feature)
+
+    if cache_position is None:
+        cache_position = torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device)
+    inputs_embeds, attention_mask, labels, position_ids = pali._merge_input_ids_with_image_features(
+        image_features, inputs_embeds, input_ids, attention_mask, None, None, cache_position
+    )
+    return inputs_embeds
+    
+
+
+def generate_pali(user_emb):
+    prompt = 'answer en what is this?'
+    model_inputs = processor(text=prompt, images=torch.zeros(1, 3, 224, 224), return_tensors="pt")
+    # we need to get im_embs taken in here.
+    input_len = model_inputs["input_ids"].shape[-1]
+    input_embeds = to_wanted_embs(user_emb.squeeze()[None, None, :].repeat(1, 256, 1), 
+                        model_inputs["input_ids"].to(device), 
+                        model_inputs["attention_mask"].to(device))
+
+    generation = pali.generate(max_new_tokens=20, do_sample=True, top_p=.98, inputs_embeds=input_embeds)
+    generation = generation[0]
+    decoded = processor.decode(generation, skip_special_tokens=True)
+    return decoded
+
+
+
+
+#############################################################
 
 
 
@@ -140,11 +180,17 @@ def generate_gpu(in_im_embs, prompt='the scene'):
                     output.frames[0][len(output.frames[0])//2], 'cuda', 1, output_hidden_state
                 )
         im_emb = im_emb.detach().to('cpu').to(torch.float32)
-    return output, im_emb
+        im = torchvision.transforms.ToTensor()(output.frames[0][len(output.frames[0])//2]).unsqueeze(0)
+        im = torch.nn.functional.interpolate(im, (224, 224))
+        im = (im - .5) * 2
+        gemb = pali.vision_tower(im.to(device).to(dtype)).last_hidden_state.detach().to('cpu').to(torch.float32).mean(1)
+        print(gemb, 'gemb')
+    return output, im_emb, gemb
 
 
 def generate(in_im_embs, prompt='the scene'):
-    output, im_emb = generate_gpu(in_im_embs, prompt)
+    print(prompt)
+    output, im_emb, gemb = generate_gpu(in_im_embs, prompt)
     nsfw =maybe_nsfw(output.frames[0][len(output.frames[0])//2])
     
     name = str(uuid.uuid4()).replace("-", "")
@@ -159,15 +205,16 @@ def generate(in_im_embs, prompt='the scene'):
     output.frames[0] = output.frames[0] + list(reversed(output.frames[0]))
 
     write_video(path, output.frames[0])
-    return path, im_emb
+    return path, im_emb, gemb
 
 
 #######################
 
 def get_user_emb(embs, ys):
     # handle case where every instance of calibration videos is 'Neither' or 'Like' or 'Dislike'
+    
     if len(list(ys)) <= 7:
-        aways = [.01*torch.randn(1280) for i in range(3)]
+        aways = [.01*torch.randn_like(embs[0]) for i in range(3)]
         embs += aways
         awal = [0 for i in range(3)]
         ys += awal
@@ -197,7 +244,7 @@ def get_user_emb(embs, ys):
         feature_embs = feature_embs / feature_embs.norm()
     
     #lin_class = Ridge(fit_intercept=False).fit(feature_embs, chosen_y)
-    lin_class = SVC(max_iter=20, kernel='linear', C=.1, class_weight='balanced').fit(feature_embs, chosen_y)
+    lin_class = SVC(max_iter=20, kernel='linear', C=.1, class_weight='balanced').fit(feature_embs.squeeze(), chosen_y)
     coef_ = torch.tensor(lin_class.coef_, dtype=torch.float32).detach().to('cpu')
     coef_ = coef_ / coef_.abs().max() * 3
 
@@ -260,14 +307,16 @@ def background_next_image():
             
             user_emb = get_user_emb(embs, ys)
             
-            gems = [g for g in gembs if isinstance(g, torch.Tensor)]
-            # need a way to get text in; could label videos. TODO TODO TODO
-            if len(gems) > 4:
-                new_gem = get_gemb(ys, gems)
-                text, gembs = generate_gemm(in_embs=new_gem)
+            print(gembs, 'gems', len(gembs))
+            print(ys, 'ys', len(ys))
+            print(embs, 'embs', len(embs))
+            
+            if len(gembs) > 4:
+                user_gem = get_user_emb(gembs, ys) / 3
+                text = generate_pali(user_gem)
             else:
-                text, gembs = generate_gemm(in_embs=torch.zeros(1, 2048))
-            img, embs = generate(user_emb, text)
+                text = generate_pali(torch.zeros(1, 1152))
+            img, embs, new_gem = generate(user_emb, text)
             
             if img:
                 tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'latest_user_to_rate', 'text', 'gemb'])
@@ -276,7 +325,7 @@ def background_next_image():
                 tmp_df['user:rating'] = [{' ': ' '}]
                 tmp_df['from_user_id'] = [uid]
                 tmp_df['text'] = [text]
-                tmp_df['gemb'] = [gembs]
+                tmp_df['gemb'] = [new_gem]
                 prevs_df = pd.concat((prevs_df, tmp_df))
                 # we can free up storage by deleting the image
                 if len(prevs_df) > 500:
@@ -347,6 +396,7 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
         choice = 1
     elif choice == 'Neither (Space)':
         img, calibrate_prompts, text = next_image(calibrate_prompts, user_id)
+        text = ''
         return img, calibrate_prompts
     else:
         choice = 0
@@ -437,7 +487,7 @@ Explore the latent space without text prompts based on your preferences. Learn m
         return None
 
     with gr.Row():
-        text = gr.Textbox(interactive=False, visible=False)
+        text = gr.Textbox(interactive=False, visible=True)
     with gr.Row(elem_id='output-image'):
         img = gr.Video(
         label='Lightning',
@@ -487,7 +537,7 @@ log = logging.getLogger('log_here')
 log.setLevel(logging.ERROR)
 
 scheduler = BackgroundScheduler()
-scheduler.add_job(func=background_next_image, trigger="interval", seconds=.1)
+scheduler.add_job(func=background_next_image, trigger="interval", seconds=.5)
 scheduler.start()
 
 #thread = threading.Thread(target=background_next_image,)
@@ -499,7 +549,14 @@ def encode_space(x):
     im_emb, _ = pipe.encode_image(
                 image, DEVICE, 1, output_hidden_state
             )
-    return im_emb.detach().to('cpu').to(torch.float32)
+            
+            
+    im = torchvision.transforms.ToTensor()(x).unsqueeze(0)
+    im = torch.nn.functional.interpolate(im, (224, 224))
+    im = (im - .5) * 2
+    gemb = pali.vision_tower(im.to(device).to(dtype)).last_hidden_state.detach().to('cpu').to(torch.float32).mean(1)
+            
+    return im_emb.detach().to('cpu').to(torch.float32), gemb
 
 # prep our calibration videos
 for im in [
@@ -518,9 +575,10 @@ for im in [
     tmp_df['paths'] = [im]
     image = list(imageio.imiter(im))
     image = image[len(image)//2]
-    im_emb = encode_space(image)
+    im_emb, gemb = encode_space(image)
 
     tmp_df['embeddings'] = [im_emb.detach().to('cpu')]
+    tmp_df['gemb'] = [gemb.detach().to('cpu')]
     tmp_df['user:rating'] = [{' ': ' '}]
     prevs_df = pd.concat((prevs_df, tmp_df))
 
