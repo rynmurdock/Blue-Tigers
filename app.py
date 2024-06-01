@@ -116,7 +116,7 @@ pipe.fuse_lora()
 
 pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15_vit-G.bin", map_location='cpu')
 # This IP adapter improves outputs substantially.
-pipe.set_ip_adapter_scale(.8)
+pipe.set_ip_adapter_scale(.6)
 pipe.unet.fuse_qkv_projections()
 #pipe.enable_free_init(method="gaussian", use_fast_sampling=True)
 
@@ -150,7 +150,7 @@ def to_wanted_embs(image_outputs, input_ids, attention_mask, cache_position=None
 
 
 def generate_pali(user_emb):
-    prompt = 'answer en What is this?'
+    prompt = 'answer en What is in this scene?'
     model_inputs = processor(text=prompt, images=torch.zeros(1, 3, 224, 224), return_tensors="pt")
     # we need to get im_embs taken in here.
     input_len = model_inputs["input_ids"].shape[-1]
