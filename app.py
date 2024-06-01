@@ -477,8 +477,6 @@ Explore the latent space without text prompts based on your preferences. Learn m
     def l():
         return None
 
-    with gr.Row():
-        text = gr.Textbox(interactive=False, visible=True, label='Text')
     with gr.Row(elem_id='output-image'):
         img = gr.Video(
         label='Lightning',
@@ -490,6 +488,8 @@ Explore the latent space without text prompts based on your preferences. Learn m
         elem_id="video_output"
        )
         img.play(l, js='''document.querySelector('[data-testid="Lightning-player"]').loop = true''')
+    with gr.Row():
+        text = gr.Textbox(interactive=False, visible=True, label='Text')
     with gr.Row(equal_height=True):
         b3 = gr.Button(value='Dislike (A)', interactive=False, elem_id="dislike")
         b2 = gr.Button(value='Neither (Space)', interactive=False, elem_id="neither", visible=False)
