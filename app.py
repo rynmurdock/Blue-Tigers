@@ -196,7 +196,7 @@ def generate(in_im_embs, prompt='the scene'):
     if nsfw:
         gr.Warning("NSFW content detected.")
         # TODO could return an automatic dislike of auto dislike on the backend for neither as well; just would need refactoring.
-        return None, im_emb
+        return None, im_emb, gemb
     
     
     output.frames[0] = output.frames[0] + list(reversed(output.frames[0]))
@@ -305,7 +305,7 @@ def background_next_image():
             user_emb = get_user_emb(embs, ys) * 3
                         
             if len(gembs) > 4:
-                user_gem = get_user_emb(gembs, ys) * 2 # TODO scale this correctly; matplotlib, etc.
+                user_gem = get_user_emb(gembs, ys) * 1 # TODO scale this correctly; matplotlib, etc.
                 text = generate_pali(user_gem)
             else:
                 text = generate_pali(torch.zeros(1, 1152))
