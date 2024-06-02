@@ -121,8 +121,9 @@ pipe.unet.fuse_qkv_projections()
 #pipe.enable_free_init(method="gaussian", use_fast_sampling=True)
 
 pipe.to(device=DEVICE)
-#pipe.unet = torch.compile(pipe.unet)
-#pipe.vae = torch.compile(pipe.vae)
+
+pipe.unet = torch.compile(pipe.unet)
+pipe.vae = torch.compile(pipe.vae)
 
 
 #############################################################
@@ -130,9 +131,9 @@ pipe.to(device=DEVICE)
 from transformers import AutoProcessor, PaliGemmaForConditionalGeneration, BitsAndBytesConfig
 
 quantization_config = BitsAndBytesConfig(load_in_4bit=True)
-pali = PaliGemmaForConditionalGeneration.from_pretrained('google/paligemma-3b-pt-224', token='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', torch_dtype=dtype, quantization_config=quantization_config).eval()
-processor = AutoProcessor.from_pretrained('google/paligemma-3b-pt-224', token='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')
-
+pali = PaliGemmaForConditionalGeneration.from_pretrained('google/paligemma-3b-mix-224', torch_dtype=dtype, quantization_config=quantization_config).eval()
+processor = AutoProcessor.from_pretrained('google/paligemma-3b-mix-224')
+pali = torch.compile(pali)
 
 
 def to_wanted_embs(image_outputs, input_ids, attention_mask, cache_position=None):
@@ -240,9 +241,9 @@ def get_user_emb(embs, ys):
         feature_embs = feature_embs / feature_embs.norm()
     
     #lin_class = Ridge(fit_intercept=False).fit(feature_embs, chosen_y)
-    lin_class = SVC(max_iter=20, kernel='linear', C=.1, class_weight='balanced').fit(feature_embs.squeeze(), chosen_y)
+    lin_class = SVC(max_iter=500, kernel='linear', C=.1, class_weight='balanced').fit(feature_embs.squeeze(), chosen_y)
     coef_ = torch.tensor(lin_class.coef_, dtype=torch.float32).detach().to('cpu')
-    coef_ = coef_ / coef_.abs().max() * 3
+    coef_ = coef_ / coef_.abs().max()
 
     w = 1# if len(embs) % 2 == 0 else 0
     im_emb = w * coef_.to(dtype=dtype)
@@ -301,10 +302,10 @@ def background_next_image():
             
             embs, ys, gembs = pluck_embs_ys(uid)
             
-            user_emb = get_user_emb(embs, ys)
+            user_emb = get_user_emb(embs, ys) * 3
                         
             if len(gembs) > 4:
-                user_gem = get_user_emb(gembs, ys) / 4 # TODO scale this correctly; matplotlib, etc.
+                user_gem = get_user_emb(gembs, ys) * 2 # TODO scale this correctly; matplotlib, etc.
                 text = generate_pali(user_gem)
             else:
                 text = generate_pali(torch.zeros(1, 1152))
@@ -354,7 +355,7 @@ def next_image(calibrate_prompts, user_id):
             return image, calibrate_prompts, ''
         else:
             embs, ys, gembs = pluck_embs_ys(user_id)
-            user_emb = get_user_emb(embs, ys)
+            user_emb = get_user_emb(embs, ys) * 3
             image, text = pluck_img(user_id, user_emb)
             return image, calibrate_prompts, text
 
@@ -546,7 +547,7 @@ def encode_space(x):
     im = torch.nn.functional.interpolate(im, (224, 224))
     im = (im - .5) * 2
     gemb = pali.vision_tower(im.to(device).to(dtype)).last_hidden_state.detach().to('cpu').to(torch.float32).mean(1)
-            
+    
     return im_emb.detach().to('cpu').to(torch.float32), gemb
 
 # prep our calibration videos
