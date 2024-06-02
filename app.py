@@ -10,6 +10,7 @@ STEPS = 6
 output_hidden_state = False
 device = "cuda"
 dtype = torch.bfloat16
+N_IMG_EMBS = 3
 
 import matplotlib.pyplot as plt
 import matplotlib
@@ -122,8 +123,8 @@ pipe.unet.fuse_qkv_projections()
 
 pipe.to(device=DEVICE)
 
-pipe.unet = torch.compile(pipe.unet)
-pipe.vae = torch.compile(pipe.vae)
+#pipe.unet = torch.compile(pipe.unet)
+#pipe.vae = torch.compile(pipe.vae)
 
 
 #############################################################
@@ -131,9 +132,10 @@ pipe.vae = torch.compile(pipe.vae)
 from transformers import AutoProcessor, PaliGemmaForConditionalGeneration, BitsAndBytesConfig
 
 quantization_config = BitsAndBytesConfig(load_in_4bit=True)
-pali = PaliGemmaForConditionalGeneration.from_pretrained('google/paligemma-3b-mix-224', torch_dtype=dtype, quantization_config=quantization_config).eval()
-processor = AutoProcessor.from_pretrained('google/paligemma-3b-mix-224')
-pali = torch.compile(pali)
+pali = PaliGemmaForConditionalGeneration.from_pretrained('google/paligemma-3b-pt-224', torch_dtype=dtype, quantization_config=quantization_config).eval()
+processor = AutoProcessor.from_pretrained('google/paligemma-3b-pt-224')
+
+#pali = torch.compile(pali)
 
 
 def to_wanted_embs(image_outputs, input_ids, attention_mask, cache_position=None):
@@ -149,18 +151,33 @@ def to_wanted_embs(image_outputs, input_ids, attention_mask, cache_position=None
     return inputs_embeds
     
 
-
-def generate_pali(user_emb):
+# TODO cache descriptions.
+def generate_pali(n_embs):
     prompt = 'caption en'
     model_inputs = processor(text=prompt, images=torch.zeros(1, 3, 224, 224), return_tensors="pt")
     # we need to get im_embs taken in here.
-    input_len = model_inputs["input_ids"].shape[-1]
-    input_embeds = to_wanted_embs(user_emb.squeeze()[None, None, :].repeat(1, 256, 1), 
-                        model_inputs["input_ids"].to(device), 
-                        model_inputs["attention_mask"].to(device))
-
-    generation = pali.generate(max_new_tokens=100, do_sample=True, top_p=.94, temperature=1.2, inputs_embeds=input_embeds)
-    decoded = processor.decode(generation[0], skip_special_tokens=True, clean_up_tokenization_spaces=True)
+    
+    descs = ''
+    for n, emb in enumerate(n_embs):
+        if n < len(n_embs)-1:
+            input_len = model_inputs["input_ids"].shape[-1]
+            input_embeds = to_wanted_embs(emb, 
+                                model_inputs["input_ids"].to(device), 
+                                model_inputs["attention_mask"].to(device))
+            generation = pali.generate(max_new_tokens=20, do_sample=True, top_p=.94, temperature=1.2, inputs_embeds=input_embeds)
+            decoded = processor.decode(generation[0], skip_special_tokens=True, clean_up_tokenization_spaces=True)
+            descs += f'Description: {decoded}\n'
+        else:
+            prompt = f'caption en {descs} Describe a new image that is similar.'
+            print(prompt)
+            model_inputs = processor(text=prompt, images=torch.zeros(1, 3, 224, 224), return_tensors="pt")
+            input_len = model_inputs["input_ids"].shape[-1]
+            input_embeds = to_wanted_embs(emb, 
+                                model_inputs["input_ids"].to(device), 
+                                model_inputs["attention_mask"].to(device))
+            generation = pali.generate(max_new_tokens=20, do_sample=True, top_p=.94, temperature=1.2, inputs_embeds=input_embeds)
+            decoded = processor.decode(generation[0], skip_special_tokens=True, clean_up_tokenization_spaces=True)
+    
     return decoded
 
 
@@ -182,7 +199,7 @@ def generate_gpu(in_im_embs, prompt='the scene'):
         im = torchvision.transforms.ToTensor()(output.frames[0][len(output.frames[0])//2]).unsqueeze(0)
         im = torch.nn.functional.interpolate(im, (224, 224))
         im = (im - .5) * 2
-        gemb = pali.vision_tower(im.to(device).to(dtype)).last_hidden_state.detach().to('cpu').to(torch.float32).mean(1)
+        gemb = pali.vision_tower(im.to(device).to(dtype)).last_hidden_state.detach().to('cpu').to(torch.float32)
     return output, im_emb, gemb
 
 
@@ -303,12 +320,13 @@ def background_next_image():
             embs, ys, gembs = pluck_embs_ys(uid)
             
             user_emb = get_user_emb(embs, ys) * 3
-                        
-            if len(gembs) > 4:
-                user_gem = get_user_emb(gembs, ys) * 1 # TODO scale this correctly; matplotlib, etc.
-                text = generate_pali(user_gem)
+                
+            pos_gembs = [g for g, y in zip(gembs, ys) if y == 1]        
+            if len(pos_gembs) > 4:
+                hist_gem = random.sample(pos_gembs, N_IMG_EMBS) # rng n embeddings
+                text = generate_pali(hist_gem)
             else:
-                text = generate_pali(torch.zeros(1, 1152))
+                text = 'the scene'
             img, embs, new_gem = generate(user_emb, text)
             
             if img:
@@ -546,7 +564,7 @@ def encode_space(x):
     im = torchvision.transforms.ToTensor()(x).unsqueeze(0)
     im = torch.nn.functional.interpolate(im, (224, 224))
     im = (im - .5) * 2
-    gemb = pali.vision_tower(im.to(device).to(dtype)).last_hidden_state.detach().to('cpu').to(torch.float32).mean(1)
+    gemb = pali.vision_tower(im.to(device).to(dtype)).last_hidden_state.detach().to('cpu').to(torch.float32)
     
     return im_emb.detach().to('cpu').to(torch.float32), gemb
 
