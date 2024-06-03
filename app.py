@@ -12,11 +12,7 @@ device = "cuda"
 dtype = torch.bfloat16
 N_IMG_EMBS = 3
 
-import matplotlib.pyplot as plt
-import matplotlib
 import logging
-
-
 import os
 import imageio
 import gradio as gr
@@ -25,8 +21,6 @@ from sklearn.svm import SVC
 from sklearn import preprocessing
 import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
-import sched
-import threading
 
 import random
 import time
@@ -105,7 +99,7 @@ pipe = AnimateDiffPipeline.from_pretrained("runwayml/stable-diffusion-v1-5", mot
                                             unet=unet, text_encoder=text_encoder)
 pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config, beta_schedule="linear")
 pipe.load_lora_weights("wangfuyun/AnimateLCM", weight_name="AnimateLCM_sd15_t2v_lora.safetensors", adapter_name="lcm-lora",)
-pipe.set_adapters(["lcm-lora"], [.9])
+pipe.set_adapters(["lcm-lora"], [.95])
 pipe.fuse_lora()
 
 
@@ -137,7 +131,7 @@ processor = AutoProcessor.from_pretrained('google/paligemma-3b-pt-224')
 
 #pali = torch.compile(pali)
 
-
+@spaces.GPU()
 def to_wanted_embs(image_outputs, input_ids, attention_mask, cache_position=None):
     inputs_embeds = pali.get_input_embeddings()(input_ids)
     selected_image_feature = image_outputs.to(dtype).to(device)
@@ -151,7 +145,8 @@ def to_wanted_embs(image_outputs, input_ids, attention_mask, cache_position=None
     return inputs_embeds
     
 
-# TODO cache descriptions.
+# TODO cache descriptions?
+@spaces.GPU()
 def generate_pali(n_embs):
     prompt = 'caption en'
     model_inputs = processor(text=prompt, images=torch.zeros(1, 3, 224, 224), return_tensors="pt")
@@ -168,7 +163,7 @@ def generate_pali(n_embs):
             decoded = processor.decode(generation[0], skip_special_tokens=True, clean_up_tokenization_spaces=True)
             descs += f'Description: {decoded}\n'
         else:
-            prompt = f'caption en {descs} Describe a new image that is similar.'
+            prompt = f'en {descs} Describe a new image that is similar.'
             print(prompt)
             model_inputs = processor(text=prompt, images=torch.zeros(1, 3, 224, 224), return_tensors="pt")
             input_len = model_inputs["input_ids"].shape[-1]
@@ -227,10 +222,10 @@ def generate(in_im_embs, prompt='the scene'):
 def get_user_emb(embs, ys):
     # handle case where every instance of calibration videos is 'Neither' or 'Like' or 'Dislike'
     
-    if len(list(ys)) <= 7:
-        aways = [.01*torch.randn_like(embs[0]) for i in range(3)]
+    if len(list(ys)) <= 10:
+        aways = [torch.zeros_like(embs[0]) for i in range(10)]
         embs += aways
-        awal = [0 for i in range(3)]
+        awal = [0 for i in range(5)] + [1 for i in range(5)]
         ys += awal
     
     indices = list(range(len(embs)))
@@ -258,7 +253,8 @@ def get_user_emb(embs, ys):
         feature_embs = feature_embs / feature_embs.norm()
     
     #lin_class = Ridge(fit_intercept=False).fit(feature_embs, chosen_y)
-    lin_class = SVC(max_iter=500, kernel='linear', C=.1, class_weight='balanced').fit(feature_embs.squeeze(), chosen_y)
+    #class_weight='balanced'
+    lin_class = SVC(max_iter=500, kernel='linear', C=.1, ).fit(feature_embs.squeeze(), chosen_y)
     coef_ = torch.tensor(lin_class.coef_, dtype=torch.float32).detach().to('cpu')
     coef_ = coef_ / coef_.abs().max()
 
@@ -290,7 +286,7 @@ def background_next_image():
         # only let it get N (maybe 3) ahead of the user
         #not_rated_rows = prevs_df[[i[1]['user:rating'] == {' ': ' '} for i in prevs_df.iterrows()]]
         rated_rows = prevs_df[[i[1]['user:rating'] != {' ': ' '} for i in prevs_df.iterrows()]]
-        while len(rated_rows) < 4:
+        while len(rated_rows) < 5:
         #    not_rated_rows = prevs_df[[i[1]['user:rating'] == {' ': ' '} for i in prevs_df.iterrows()]]
             rated_rows = prevs_df[[i[1]['user:rating'] != {' ': ' '} for i in prevs_df.iterrows()]]
             time.sleep(.01)
@@ -307,20 +303,15 @@ def background_next_image():
             rated_from_user = rated_rows[[i[1]['from_user_id'] == uid for i in rated_rows.iterrows()]]
 
             # we pop previous ratings if there are > n
-            if len(rated_from_user) >= 15:
+            if len(rated_from_user) >= 25:
                 oldest = rated_from_user.iloc[0]['paths']
                 prevs_df = prevs_df[prevs_df['paths'] != oldest]
             # we don't compute more after n are in the queue for them
-            if len(unrated_from_user) >= 10:
-                continue
-            
-            if len(rated_rows) < 5:
+            if len(unrated_from_user) >= 20:
                 continue
             
             embs, ys, gembs = pluck_embs_ys(uid)
-            
             user_emb = get_user_emb(embs, ys) * 3
-                
             pos_gembs = [g for g, y in zip(gembs, ys) if y == 1]        
             if len(pos_gembs) > 4:
                 hist_gem = random.sample(pos_gembs, N_IMG_EMBS) # rng n embeddings
@@ -369,19 +360,12 @@ def next_image(calibrate_prompts, user_id):
         if len(calibrate_prompts) > 0:
             cal_video = calibrate_prompts.pop(0)
             image = prevs_df[prevs_df['paths'] == cal_video]['paths'].to_list()[0]
-            
             return image, calibrate_prompts, ''
         else:
             embs, ys, gembs = pluck_embs_ys(user_id)
             user_emb = get_user_emb(embs, ys) * 3
             image, text = pluck_img(user_id, user_emb)
             return image, calibrate_prompts, text
-
-
-
-
-
-
 
 
 
@@ -417,6 +401,7 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
         print('NSFW -- choice is disliked')
         choice = 0
     
+    print(prevs_df['paths'].to_list(), img)
     row_mask = [p.split('/')[-1] in img for p in prevs_df['paths'].to_list()]
     # if it's still in the dataframe, add the choice
     if len(prevs_df.loc[row_mask, 'user:rating']) > 0:
@@ -550,23 +535,6 @@ scheduler = BackgroundScheduler()
 scheduler.add_job(func=background_next_image, trigger="interval", seconds=.5)
 scheduler.start()
 
-#thread = threading.Thread(target=background_next_image,)
-#thread.start()
-
-# TODO shouldn't call this before gradio launch, yeah?
-@spaces.GPU()
-def encode_space(x):
-    im_emb, _ = pipe.encode_image(
-                image, DEVICE, 1, output_hidden_state
-            )
-            
-            
-    im = torchvision.transforms.ToTensor()(x).unsqueeze(0)
-    im = torch.nn.functional.interpolate(im, (224, 224))
-    im = (im - .5) * 2
-    gemb = pali.vision_tower(im.to(device).to(dtype)).last_hidden_state.detach().to('cpu').to(torch.float32)
-    
-    return im_emb.detach().to('cpu').to(torch.float32), gemb
 
 # prep our calibration videos
 for im in [
@@ -585,10 +553,8 @@ for im in [
     tmp_df['paths'] = [im]
     image = list(imageio.imiter(im))
     image = image[len(image)//2]
-    im_emb, gemb = encode_space(image)
-
-    tmp_df['embeddings'] = [im_emb.detach().to('cpu')]
-    tmp_df['gemb'] = [gemb.detach().to('cpu')]
+    tmp_df['embeddings'] = [torch.load(im.replace('mp4', 'im_.pt'))]
+    tmp_df['gemb'] = [torch.load(im.replace('mp4', 'gemb_.pt'))]
     tmp_df['user:rating'] = [{' ': ' '}]
     prevs_df = pd.concat((prevs_df, tmp_df))
 
