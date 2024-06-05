@@ -123,13 +123,24 @@ pipe.to(device=DEVICE)
 
 #############################################################
 
-from transformers import AutoProcessor, PaliGemmaForConditionalGeneration, BitsAndBytesConfig
-
-quantization_config = BitsAndBytesConfig(load_in_4bit=True)
-pali = PaliGemmaForConditionalGeneration.from_pretrained('google/paligemma-3b-pt-224', torch_dtype=dtype, quantization_config=quantization_config).eval()
-processor = AutoProcessor.from_pretrained('google/paligemma-3b-pt-224')
+#from transformers import AutoProcessor, PaliGemmaForConditionalGeneration, BitsAndBytesConfig
+#quantization_config = BitsAndBytesConfig(load_in_4bit=True)
+#pali = PaliGemmaForConditionalGeneration.from_pretrained('google/paligemma-3b-pt-224', torch_dtype=dtype, quantization_config=quantization_config).eval()
+#processor = AutoProcessor.from_pretrained('google/paligemma-3b-mix-224')
 
 #pali = torch.compile(pali)
+
+
+from transformers import pipeline
+
+pipe = pipeline("text-generation", model="Efficient-Large-Model/VILA1.5-3b-s2-AWQ")
+
+
+
+
+
+
+
 
 @spaces.GPU()
 def to_wanted_embs(image_outputs, input_ids, attention_mask, cache_position=None):
@@ -163,7 +174,7 @@ def generate_pali(n_embs):
             decoded = processor.decode(generation[0], skip_special_tokens=True, clean_up_tokenization_spaces=True)
             descs += f'Description: {decoded}\n'
         else:
-            prompt = f'en {descs} Describe a new image that is similar.'
+            prompt = f'en {descs} Describe a new image that is similar. Description: '
             print(prompt)
             model_inputs = processor(text=prompt, images=torch.zeros(1, 3, 224, 224), return_tensors="pt")
             input_len = model_inputs["input_ids"].shape[-1]
@@ -176,7 +187,9 @@ def generate_pali(n_embs):
     return decoded
 
 
-
+def generate_vila(images, prompt):
+    with torch.no_grad():
+        pipe.generate('<image> <image> <image> Describe an image that would be similar to these images.', , ,)
 
 #############################################################
 
@@ -201,7 +214,6 @@ def generate_gpu(in_im_embs, prompt='the scene'):
 def generate(in_im_embs, prompt='the scene'):
     output, im_emb, gemb = generate_gpu(in_im_embs, prompt)
     nsfw =maybe_nsfw(output.frames[0][len(output.frames[0])//2])
-    print(prompt)
     name = str(uuid.uuid4()).replace("-", "")
     path = f"/tmp/{name}.mp4"
     
@@ -401,7 +413,6 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
         print('NSFW -- choice is disliked')
         choice = 0
     
-    print(prevs_df['paths'].to_list(), img)
     row_mask = [p.split('/')[-1] in img for p in prevs_df['paths'].to_list()]
     # if it's still in the dataframe, add the choice
     if len(prevs_df.loc[row_mask, 'user:rating']) > 0:
