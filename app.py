@@ -111,7 +111,7 @@ pipe.enable_vae_slicing()
 
 pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15_vit-G.bin", map_location='cpu')
 # This IP adapter improves outputs substantially.
-pipe.set_ip_adapter_scale(.9) # .6
+pipe.set_ip_adapter_scale(1.) # .6
 pipe.unet.fuse_qkv_projections()
 #pipe.enable_free_init(method="gaussian", use_fast_sampling=True)
 
@@ -144,7 +144,7 @@ tokenizer, vila, image_processor, context_len = load_pretrained_model(vilap, mod
 vila = torch.compile(vila)
 
 @spaces.GPU()
-def eval_model(images, qs=f"Describe an image inspired by these in around three words.", model_name='vicuna_v1'):
+def eval_model(images, qs=f"<image> is ugly. <image> and <image> are beautiful. Give a one-word description of a different beautiful image.", model_name='vicuna_v1'):
     global vila
 
     images = [torchvision.transforms.ToPILImage(mode='RGB')(i) for i in images]
@@ -390,17 +390,20 @@ def background_next_image():
             
             
             pos_mask = [i[uid] == 1 for i in rated_rows['user:rating'].to_list()]
-            
+            neg_mask = [i[uid] == 0 for i in rated_rows['user:rating'].to_list()]
             paths_pos_from_user = rated_rows[pos_mask]['paths'].to_list()
+            paths_neg_from_user= rated_rows[neg_mask]['paths'].to_list()
             # TODO keep middle frame in row
+            
+            images = [paths_neg_from_user[random.randint(0, len(paths_neg_from_user)-1)]]
+            for _ in range(N_IMG_EMBS):
+                images += [paths_pos_from_user[random.randint(0, len(paths_pos_from_user)-1)]]
             ims = []
-            for im in paths_pos_from_user:
+            for im in images:
                 image = list(imageio.imiter(im))
                 image = image[len(image)//2]
                 ims.append(image)
-            images = ims[-(N_IMG_EMBS-1):]
-            images += ims[random.randint(0, len(ims)-N_IMG_EMBS-1)]
-            text = eval_model(images)
+            text = eval_model(ims)
             img, embs = generate(user_emb, text)
             
             if img:
@@ -573,7 +576,7 @@ Explore the latent space without text prompts based on your preferences. Learn m
        )
         img.play(l, js='''document.querySelector('[data-testid="Lightning-player"]').loop = true''')
     with gr.Row():
-        text = gr.Textbox(interactive=False, visible=True, label='Text')
+        text = gr.Textbox(interactive=False, visible=False, label='Text')
     with gr.Row(equal_height=True):
         b3 = gr.Button(value='Dislike (A)', interactive=False, elem_id="dislike")
         b2 = gr.Button(value='Neither (Space)', interactive=False, elem_id="neither", visible=False)
