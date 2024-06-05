@@ -32,7 +32,7 @@ torch.set_grad_enabled(False)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
-prevs_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'latest_user_to_rate', 'from_user_id', 'text', 'gemb'])
+prevs_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'latest_user_to_rate', 'from_user_id', 'text', ])
 
 import spaces
 start_time = time.time()
@@ -101,7 +101,7 @@ pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config, beta_schedule="
 pipe.load_lora_weights("wangfuyun/AnimateLCM", weight_name="AnimateLCM_sd15_t2v_lora.safetensors", adapter_name="lcm-lora",)
 pipe.set_adapters(["lcm-lora"], [.95])
 pipe.fuse_lora()
-
+pipe.enable_vae_slicing()
 
 #pipe = AnimateDiffPipeline.from_pretrained('emilianJR/epiCRealism', torch_dtype=dtype, image_encoder=image_encoder)
 #pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing", beta_schedule="linear")
@@ -111,34 +111,107 @@ pipe.fuse_lora()
 
 pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15_vit-G.bin", map_location='cpu')
 # This IP adapter improves outputs substantially.
-pipe.set_ip_adapter_scale(.6)
+pipe.set_ip_adapter_scale(.9) # .6
 pipe.unet.fuse_qkv_projections()
 #pipe.enable_free_init(method="gaussian", use_fast_sampling=True)
 
 pipe.to(device=DEVICE)
 
-#pipe.unet = torch.compile(pipe.unet)
-#pipe.vae = torch.compile(pipe.vae)
+pipe.unet = torch.compile(pipe.unet)
+pipe.vae = torch.compile(pipe.vae)
 
-
-#############################################################
-
-#from transformers import AutoProcessor, PaliGemmaForConditionalGeneration, BitsAndBytesConfig
-#quantization_config = BitsAndBytesConfig(load_in_4bit=True)
-#pali = PaliGemmaForConditionalGeneration.from_pretrained('google/paligemma-3b-pt-224', torch_dtype=dtype, quantization_config=quantization_config).eval()
-#processor = AutoProcessor.from_pretrained('google/paligemma-3b-mix-224')
-
-#pali = torch.compile(pali)
-
+# VILA
+#####################################################################################################
 
 from transformers import pipeline
 
-pipe = pipeline("text-generation", model="Efficient-Large-Model/VILA1.5-3b-s2-AWQ")
+from llava.constants import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN,
+                             DEFAULT_IMAGE_TOKEN, IMAGE_PLACEHOLDER,
+                             IMAGE_TOKEN_INDEX)
+from llava.conversation import SeparatorStyle, conv_templates
+from llava.mm_utils import (KeywordsStoppingCriteria, get_model_name_from_path,
+                            process_images, tokenizer_image_token)
+from llava.model.builder import load_pretrained_model
+from llava.utils import disable_torch_init
 
 
 
+vilap = 'Efficient-Large-Model/VILA1.5-3b'
+model_name = get_model_name_from_path(vilap)
+tokenizer, vila, image_processor, context_len = load_pretrained_model(vilap, model_name, None, torch_dtype=torch.bfloat16, 
+                                                                        device=0, device_map={'':0}, 
+                                                                        use_safetensors=True,)
+vila = torch.compile(vila)
+
+@spaces.GPU()
+def eval_model(images, qs=f"Describe an image inspired by these in around three words.", model_name='vicuna_v1'):
+    global vila
+
+    images = [torchvision.transforms.ToPILImage(mode='RGB')(i) for i in images]
+    image_token_se = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN
+    if IMAGE_PLACEHOLDER in qs:
+        if vila.config.mm_use_im_start_end:
+            qs = re.sub(IMAGE_PLACEHOLDER, image_token_se, qs)
+        else:
+            qs = re.sub(IMAGE_PLACEHOLDER, DEFAULT_IMAGE_TOKEN, qs)
+    else:
+        if DEFAULT_IMAGE_TOKEN not in qs:
+            print("no <image> tag found in input. Automatically append one at the beginning of text.")
+            # do not repeatively append the prompt.
+            if vila.config.mm_use_im_start_end:
+                qs = (image_token_se + "\n") * len(images) + qs
+            else:
+                qs = (DEFAULT_IMAGE_TOKEN + "\n") * len(images) + qs
+    print("input: ", qs)
+
+    if "llama-2" in model_name.lower():
+        conv_mode = "llava_llama_2"
+    elif "v1" in model_name.lower():
+        conv_mode = "llava_v1"
+    elif "mpt" in model_name.lower():
+        conv_mode = "mpt"
+    else:
+        conv_mode = "llava_v0"
 
 
+    conv = conv_templates[conv_mode].copy()
+    conv.append_message(conv.roles[0], qs)
+    conv.append_message(conv.roles[1], None)
+    prompt = conv.get_prompt()
+    
+        
+    images_tensor = process_images(images, image_processor, vila.config).to('cuda', dtype=torch.float16, )
+    input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").unsqueeze(0).cuda()
+
+    stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
+    keywords = [stop_str]
+    stopping_criteria = KeywordsStoppingCriteria(keywords, tokenizer, input_ids)
+
+    with torch.inference_mode():
+        output_ids = vila.generate(
+            input_ids,
+            images=[
+                images_tensor,
+            ],
+            do_sample=True,
+            temperature=.8,
+            top_p=.97,
+            max_new_tokens=128,
+            use_cache=True,
+            stopping_criteria=[stopping_criteria],
+        )
+
+    outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0]
+    outputs = outputs.strip()
+    if outputs.endswith(stop_str):
+        outputs = outputs[: -len(stop_str)]
+    outputs = outputs.strip()
+    print(outputs)
+    return outputs
+    
+    
+
+#####################################################################################################
 
 
 
@@ -187,10 +260,6 @@ def generate_pali(n_embs):
     return decoded
 
 
-def generate_vila(images, prompt):
-    with torch.no_grad():
-        pipe.generate('<image> <image> <image> Describe an image that would be similar to these images.', , ,)
-
 #############################################################
 
 
@@ -203,16 +272,11 @@ def generate_gpu(in_im_embs, prompt='the scene'):
         im_emb, _ = pipe.encode_image(
                     output.frames[0][len(output.frames[0])//2], 'cuda', 1, output_hidden_state
                 )
-        im_emb = im_emb.detach().to('cpu').to(torch.float32)
-        im = torchvision.transforms.ToTensor()(output.frames[0][len(output.frames[0])//2]).unsqueeze(0)
-        im = torch.nn.functional.interpolate(im, (224, 224))
-        im = (im - .5) * 2
-        gemb = pali.vision_tower(im.to(device).to(dtype)).last_hidden_state.detach().to('cpu').to(torch.float32)
-    return output, im_emb, gemb
+    return output, im_emb
 
 
 def generate(in_im_embs, prompt='the scene'):
-    output, im_emb, gemb = generate_gpu(in_im_embs, prompt)
+    output, im_emb = generate_gpu(in_im_embs, prompt)
     nsfw =maybe_nsfw(output.frames[0][len(output.frames[0])//2])
     name = str(uuid.uuid4()).replace("-", "")
     path = f"/tmp/{name}.mp4"
@@ -220,13 +284,12 @@ def generate(in_im_embs, prompt='the scene'):
     if nsfw:
         gr.Warning("NSFW content detected.")
         # TODO could return an automatic dislike of auto dislike on the backend for neither as well; just would need refactoring.
-        return None, im_emb, gemb
+        return None, im_emb
     
     
     output.frames[0] = output.frames[0] + list(reversed(output.frames[0]))
-
     write_video(path, output.frames[0])
-    return path, im_emb, gemb
+    return path, im_emb
 
 
 #######################
@@ -322,24 +385,31 @@ def background_next_image():
             if len(unrated_from_user) >= 20:
                 continue
             
-            embs, ys, gembs = pluck_embs_ys(uid)
+            embs, ys = pluck_embs_ys(uid)
             user_emb = get_user_emb(embs, ys) * 3
-            pos_gembs = [g for g, y in zip(gembs, ys) if y == 1]        
-            if len(pos_gembs) > 4:
-                hist_gem = random.sample(pos_gembs, N_IMG_EMBS) # rng n embeddings
-                text = generate_pali(hist_gem)
-            else:
-                text = 'the scene'
-            img, embs, new_gem = generate(user_emb, text)
+            
+            
+            pos_mask = [i[uid] == 1 for i in rated_rows['user:rating'].to_list()]
+            
+            paths_pos_from_user = rated_rows[pos_mask]['paths'].to_list()
+            # TODO keep middle frame in row
+            ims = []
+            for im in paths_pos_from_user:
+                image = list(imageio.imiter(im))
+                image = image[len(image)//2]
+                ims.append(image)
+            images = ims[-(N_IMG_EMBS-1):]
+            images += ims[random.randint(0, len(ims)-N_IMG_EMBS-1)]
+            text = eval_model(images)
+            img, embs = generate(user_emb, text)
             
             if img:
-                tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'latest_user_to_rate', 'text', 'gemb'])
+                tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'latest_user_to_rate', 'text', ])
                 tmp_df['paths'] = [img]
-                tmp_df['embeddings'] = [embs]
+                tmp_df['embeddings'] = [embs.detach().to(device='cpu', dtype=torch.float32)]
                 tmp_df['user:rating'] = [{' ': ' '}]
                 tmp_df['from_user_id'] = [uid]
                 tmp_df['text'] = [text]
-                tmp_df['gemb'] = [new_gem]
                 prevs_df = pd.concat((prevs_df, tmp_df))
                 # we can free up storage by deleting the image
                 if len(prevs_df) > 500:
@@ -364,8 +434,7 @@ def pluck_embs_ys(user_id):
     
     embs = rated_rows['embeddings'].to_list()
     ys = [i[user_id] for i in rated_rows['user:rating'].to_list()]
-    gembs = rated_rows['gemb'].to_list()
-    return embs, ys, gembs
+    return embs, ys
 
 def next_image(calibrate_prompts, user_id):
     with torch.no_grad():
@@ -374,7 +443,7 @@ def next_image(calibrate_prompts, user_id):
             image = prevs_df[prevs_df['paths'] == cal_video]['paths'].to_list()[0]
             return image, calibrate_prompts, ''
         else:
-            embs, ys, gembs = pluck_embs_ys(user_id)
+            embs, ys = pluck_embs_ys(user_id)
             user_emb = get_user_emb(embs, ys) * 3
             image, text = pluck_img(user_id, user_emb)
             return image, calibrate_prompts, text
@@ -462,9 +531,9 @@ function fadeInOut(button, color) {
 document.body.addEventListener('click', function(event) {
     const target = event.target;
     if (target.id === 'dislike') {
-      fadeInOut(target, '#ff1717');
+      fadeInOut(target, '#0099ff');
     } else if (target.id === 'like') {
-      fadeInOut(target, '#006500');
+      fadeInOut(target, '#0099ff');
     } else if (target.id === 'neither') {
       fadeInOut(target, '#cccccc');
     }
@@ -473,7 +542,7 @@ document.body.addEventListener('click', function(event) {
 </script>
 '''
 
-with gr.Blocks(css=css, head=js_head) as demo:
+with gr.Blocks(css=css, head=js_head, theme=gr.themes.Soft()) as demo:
     gr.Markdown('''# Blue Tigers
 ### Generative Recommenders for Exporation of Video
 
@@ -532,7 +601,7 @@ Explore the latent space without text prompts based on your preferences. Learn m
                  )
     with gr.Row():
         html = gr.HTML('''<div style='text-align:center; font-size:20px'>You will calibrate for several videos and then roam. </ div><br><br><br>
-<div style='text-align:center; font-size:14px'>Note that while the AnimateLCM model with NSFW filtering is unlikely to produce NSFW images, this may still occur, and users should avoid NSFW content when rating.
+<div style='text-align:center; font-size:14px'>Note that while the AnimateLCM model with NSFW filtering & the Villa model are unlikely to produce NSFW images, this may still occur, and users should avoid NSFW content when rating.
 </ div>
 <br><br>
 <div style='text-align:center; font-size:14px'>Thanks to @multimodalart for their contributions to the demo, esp. the interface and @maxbittker for feedback.
@@ -560,16 +629,15 @@ for im in [
     './ninth.mp4',
     './tenth.mp4',
     ]:
-    tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'text', 'gemb'])
+    tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'text',])
     tmp_df['paths'] = [im]
     image = list(imageio.imiter(im))
     image = image[len(image)//2]
     tmp_df['embeddings'] = [torch.load(im.replace('mp4', 'im_.pt'))]
-    tmp_df['gemb'] = [torch.load(im.replace('mp4', 'gemb_.pt'))]
     tmp_df['user:rating'] = [{' ': ' '}]
     prevs_df = pd.concat((prevs_df, tmp_df))
 
-
-demo.launch(share=True, server_port=8443)
+if __name__ == "__main__":
+    demo.launch(share=True, server_port=8443)
 
 
