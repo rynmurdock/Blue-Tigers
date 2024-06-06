@@ -2,6 +2,7 @@
 
 # TODO unify/merge origin and this
 # TODO save & restart from (if it exists) dataframe parquet
+
 import torch
 
 # lol
@@ -111,9 +112,11 @@ pipe.enable_vae_slicing()
 
 pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15_vit-G.bin", map_location='cpu')
 # This IP adapter improves outputs substantially.
-pipe.set_ip_adapter_scale(1.) # .6
+pipe.set_ip_adapter_scale(.8) # .6
 pipe.unet.fuse_qkv_projections()
 #pipe.enable_free_init(method="gaussian", use_fast_sampling=True)
+
+
 
 pipe.to(device=DEVICE)
 
@@ -144,7 +147,7 @@ tokenizer, vila, image_processor, context_len = load_pretrained_model(vilap, mod
 vila = torch.compile(vila)
 
 @spaces.GPU()
-def eval_model(images, qs=f"<image> is ugly. <image> and <image> are beautiful. Give a one-word description of a different beautiful image.", model_name='vicuna_v1'):
+def eval_model(images, qs=f"<image> is bad. <image> and <image> are good. Give a one-word description of a different good image.", model_name='vicuna_v1'):
     global vila
 
     images = [torchvision.transforms.ToPILImage(mode='RGB')(i) for i in images]
@@ -268,7 +271,7 @@ def generate_pali(n_embs):
 def generate_gpu(in_im_embs, prompt='the scene'):
     with torch.no_grad():
         in_im_embs = in_im_embs.to('cuda').unsqueeze(0).unsqueeze(0)
-        output = pipe(prompt=prompt, guidance_scale=1, added_cond_kwargs={}, ip_adapter_image_embeds=[in_im_embs], num_inference_steps=STEPS)
+        output = pipe(prompt=prompt, guidance_scale=1, added_cond_kwargs={}, ip_adapter_image_embeds=[in_im_embs], num_inference_steps=STEPS,)
         im_emb, _ = pipe.encode_image(
                     output.frames[0][len(output.frames[0])//2], 'cuda', 1, output_hidden_state
                 )
