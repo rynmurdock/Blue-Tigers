@@ -49,25 +49,35 @@ import uuid
 import av
 import torchvision
 
-def write_video(file_name, images, fps=17):
+def write_video(audio_name, file_name, images, fps=17):
     container = av.open(file_name, mode="w")
-
-    stream = container.add_stream("h264", rate=fps)
+    
+    oastream = container.add_stream("h264", rate=fps)
     # stream.options = {'preset': 'faster'}
-    stream.thread_count = 1
-    stream.width = 512
-    stream.height = 512
-    stream.pix_fmt = "yuv420p"
+    oastream.thread_count = 1
+    oastream.width = 512
+    oastream.height = 512
+    oastream.pix_fmt = "yuv420p"
 
     for img in images:
         img = np.array(img)
         img = np.round(img).astype(np.uint8)
         frame = av.VideoFrame.from_ndarray(img, format="rgb24")
-        for packet in stream.encode(frame):
+        for packet in oastream.encode(frame):
             container.mux(packet)
+    
+    adstream = container.add_stream('aac')
+    audio_input = av.open(audio_name, 'r')
+    stream = audio_input.streams.audio[0]
+    for packet in audio_input.demux((stream,)):
+        for frame in packet.decode():
+            a_frames = adstream.encode(frame)
+            container.mux(a_frames)
+    
     # Flush stream
-    for packet in stream.encode():
+    for packet in oastream.encode():
         container.mux(packet)
+    
     # Close the file
     container.close()
 
@@ -103,7 +113,7 @@ model_name = get_model_name_from_path(vilap)
 tokenizer, vila, image_processor, context_len = load_pretrained_model(vilap, model_name, None, torch_dtype=torch.bfloat16, 
                                                                         device=0,
                                                                         use_safetensors=True, load_8bit=True)
-#vila = torch.compile(vila)
+vila = torch.compile(vila)
 ############################################################################################################
 @spaces.GPU()
 def eval_model(images, qs=f"<image> is bad. <image> and <image> are good. Give a one-word description of a different good image.", model_name='vicuna_v1'):
@@ -158,7 +168,7 @@ def eval_model(images, qs=f"<image> is bad. <image> and <image> are good. Give a
                 do_sample=True,
                 temperature=.8,
                 top_p=.97,
-                max_new_tokens=128,
+                max_new_tokens=16,
                 use_cache=True,
                 stopping_criteria=[stopping_criteria],
             )
@@ -213,8 +223,8 @@ pipe.unet.fuse_qkv_projections()
 
 pipe.to(device=DEVICE)
 
-#pipe.unet = torch.compile(pipe.unet)
-#pipe.vae = torch.compile(pipe.vae)
+pipe.unet = torch.compile(pipe.unet)
+pipe.vae = torch.compile(pipe.vae)
 
 
 ##########################################################################################################################
@@ -234,6 +244,7 @@ sample_rate = model_config["sample_rate"]
 sample_size = model_config["sample_size"]
 
 audio_model = audio_model.to(device)
+audio_model = torch.compile(audio_model)
 
 def get_audio(text):
 
@@ -241,13 +252,13 @@ def get_audio(text):
     conditioning = [{
         "prompt": text,
         "seconds_start": 0, 
-        "seconds_total": 4
+        "seconds_total": 2
     }]
 
     # Generate stereo audio
     output = generate_diffusion_cond(
         audio_model,
-        steps=40,
+        steps=10,
         cfg_scale=7,
         conditioning=conditioning,
         sample_size=sample_size,
@@ -261,7 +272,7 @@ def get_audio(text):
     output = rearrange(output, "b d n -> d (b n)")
 
     # Peak normalize, clip, convert to int16, and save to file
-    output = output[:, :4*sample_rate]
+    output = output[:, :2*sample_rate]
     output = output.to(torch.float32).div(torch.max(torch.abs(output))).clamp(-1, 1).mul(32767).to(torch.int16).cpu()
     name = str(uuid.uuid4()).replace("-", "")
     path = f"/tmp/{name}.mp4"
@@ -305,7 +316,8 @@ def generate(in_im_embs, prompt='the scene'):
     
     
     output.frames[0] = output.frames[0] + list(reversed(output.frames[0]))
-    write_video(path, output.frames[0])
+    output_f = np.array(output.frames[0])
+    write_video(audio, path, output_f)
     
     return path, im_emb, audio
 
@@ -358,7 +370,7 @@ def get_user_emb(embs, ys):
 
 def pluck_img(user_id, user_emb):
     not_rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, 'gone') == 'gone' for i in prevs_df.iterrows()]]
-    while len(not_rated_rows) == 0:
+    while len(not_rated_rows) == 0: # TODO try just returning, less logs?
         not_rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, 'gone') == 'gone' for i in prevs_df.iterrows()]]
         time.sleep(.001)
     # TODO optimize this lol
@@ -424,7 +436,8 @@ def background_next_image():
                 image = list(imageio.imiter(im))
                 image = image[len(image)//2]
                 ims.append(image)
-            text = eval_model(ims)
+            with torch.no_grad():
+                text = eval_model(ims)
             img, embs, audio = generate(user_emb, text)
             
             if img:
@@ -499,7 +512,7 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
         choice = 1
     elif choice == 'Neither (Space)':
         img, calibrate_prompts, text, audio = next_image(calibrate_prompts, user_id)
-        return img, calibrate_prompts, text
+        return img, calibrate_prompts, text, audio
     else:
         choice = 0
     
@@ -515,7 +528,7 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
         prevs_df.loc[row_mask, 'user:rating'][0][user_id] = choice
         prevs_df.loc[row_mask, 'latest_user_to_rate'] = [user_id]
     img, calibrate_prompts, text, audio = next_image(calibrate_prompts, user_id)
-    return img, calibrate_prompts, text, audio
+    return img, calibrate_prompts, text, None
 
 css = '''.gradio-container{max-width: 700px !important}
 #description{text-align: center}
@@ -601,7 +614,7 @@ Explore the latent space without text prompts based on your preferences. Learn m
        )
         img.play(l, js='''document.querySelector('[data-testid="Lightning-player"]').loop = true''')
     with gr.Row():
-        audio = gr.Audio(interactive=False, visible=False, label='Audio', autoplay=True)
+        audio = gr.Audio(interactive=False, visible=False, label='Audio', autoplay=False)
         audio.play(l, js='''document.querySelector("#waveform > div").shadowRoot.querySelector("audio").loop = true''',)
         text = gr.Textbox(interactive=False, visible=False, label='Text')
     with gr.Row(equal_height=True):
