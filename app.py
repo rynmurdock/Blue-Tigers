@@ -124,7 +124,6 @@ def eval_model(images, qs=f"<image> is bad. <image> and <image> are good. Give a
                 qs = (image_token_se + "\n") * len(images) + qs
             else:
                 qs = (DEFAULT_IMAGE_TOKEN + "\n") * len(images) + qs
-    print("input: ", qs)
 
     if "llama-2" in model_name.lower():
         conv_mode = "llava_llama_2"
@@ -242,13 +241,13 @@ def get_audio(text):
     conditioning = [{
         "prompt": text,
         "seconds_start": 0, 
-        "seconds_total": 8
+        "seconds_total": 4
     }]
 
     # Generate stereo audio
     output = generate_diffusion_cond(
         audio_model,
-        steps=20,
+        steps=40,
         cfg_scale=7,
         conditioning=conditioning,
         sample_size=sample_size,
@@ -262,7 +261,7 @@ def get_audio(text):
     output = rearrange(output, "b d n -> d (b n)")
 
     # Peak normalize, clip, convert to int16, and save to file
-    output = output[:, :8*sample_rate]
+    output = output[:, :4*sample_rate]
     output = output.to(torch.float32).div(torch.max(torch.abs(output))).clamp(-1, 1).mul(32767).to(torch.int16).cpu()
     name = str(uuid.uuid4()).replace("-", "")
     path = f"/tmp/{name}.mp4"
@@ -283,9 +282,9 @@ from safety_checker_improved import maybe_nsfw
 def generate_gpu(in_im_embs, prompt='the scene'):
     with torch.no_grad():
         in_im_embs = in_im_embs.to('cuda').unsqueeze(0).unsqueeze(0)
-        print(prompt, in_im_embs, STEPS, 'inpu')
+
         output = pipe(prompt=prompt, guidance_scale=1, added_cond_kwargs={}, ip_adapter_image_embeds=[in_im_embs], num_inference_steps=STEPS,)
-        print(output, 'outpu')
+
         im_emb, _ = pipe.encode_image(
                     output.frames[0][len(output.frames[0])//2], 'cuda', 1, output_hidden_state
                 )
@@ -373,7 +372,6 @@ def pluck_img(user_id, user_emb):
     img = best_row['paths']
     text = best_row.get('text', '')
     audio = best_row.get('audio')
-    print(audio)
     if not isinstance(audio, str) or audio == 'nan':
         audio = None
     return img, text, audio
@@ -587,8 +585,9 @@ Explore the latent space without text prompts based on your preferences. Learn m
     './fifth.mp4',
     './sixth.mp4',
     ])
-    def l():
-        return None
+    def l(audio):
+        print(audio)
+        return audio
 
     with gr.Row(elem_id='output-image'):
         img = gr.Video(
@@ -602,7 +601,8 @@ Explore the latent space without text prompts based on your preferences. Learn m
        )
         img.play(l, js='''document.querySelector('[data-testid="Lightning-player"]').loop = true''')
     with gr.Row():
-        audio = gr.Audio(interactive=False, visible=True, label='Audio', autoplay=True)
+        audio = gr.Audio(interactive=False, visible=False, label='Audio', autoplay=True)
+        audio.play(l, js='''document.querySelector("#waveform > div").shadowRoot.querySelector("audio").loop = true''',)
         text = gr.Textbox(interactive=False, visible=False, label='Text')
     with gr.Row(equal_height=True):
         b3 = gr.Button(value='Dislike (A)', interactive=False, elem_id="dislike")
