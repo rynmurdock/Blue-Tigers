@@ -319,7 +319,7 @@ class LlavaMetaForCausalLM(ABC):
         input_ids_copy = input_ids.clone()
         # kentang-mit@: Otherwise tokenizer out of bounds. Embeddings of image tokens will not be used.
         input_ids_copy[input_ids_copy == IMAGE_TOKEN_INDEX] = 0
-        input_embeds = self.llm.model.embed_tokens(input_ids_copy)
+        input_embeds = self.llm.model.embed_tokens(input_ids_copy.to(torch.long))
 
         input_ids = [
             cur_input_ids[cur_attention_mask] for cur_input_ids, cur_attention_mask in zip(input_ids, attention_mask)

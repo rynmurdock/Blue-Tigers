@@ -26,19 +26,19 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import random
 import time
 from PIL import Image
-from safety_checker_improved import maybe_nsfw
+
 
 
 torch.set_grad_enabled(False)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
-prevs_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'latest_user_to_rate', 'from_user_id', 'text', ])
+prevs_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'latest_user_to_rate', 'from_user_id', 'text', 'audio'])
 
 import spaces
 start_time = time.time()
 
-####################### Setup Model
+####################### Setup Models
 from diffusers import AnimateDiffPipeline, MotionAdapter, EulerDiscreteScheduler, LCMScheduler, AutoencoderTiny, UNet2DConditionModel, AutoencoderKL
 from transformers import CLIPTextModel
 from huggingface_hub import hf_hub_download
@@ -79,6 +79,100 @@ def imio_write_video(file_name, images, fps=15):
     writer.close()
 
 
+
+
+
+# VILA
+#####################################################################################################
+
+from transformers import pipeline
+
+from llava.constants import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN,
+                             DEFAULT_IMAGE_TOKEN, IMAGE_PLACEHOLDER,
+                             IMAGE_TOKEN_INDEX)
+from llava.conversation import SeparatorStyle, conv_templates
+from llava.mm_utils import (KeywordsStoppingCriteria, get_model_name_from_path,
+                            process_images, tokenizer_image_token)
+from llava.model.builder import load_pretrained_model
+from llava.utils import disable_torch_init
+
+
+
+vilap = 'Efficient-Large-Model/VILA1.5-3b'
+model_name = get_model_name_from_path(vilap)
+tokenizer, vila, image_processor, context_len = load_pretrained_model(vilap, model_name, None, torch_dtype=torch.bfloat16, 
+                                                                        device=0,
+                                                                        use_safetensors=True, load_8bit=True)
+#vila = torch.compile(vila)
+############################################################################################################
+@spaces.GPU()
+def eval_model(images, qs=f"<image> is bad. <image> and <image> are good. Give a one-word description of a different good image.", model_name='vicuna_v1'):
+    global vila
+
+    images = [torchvision.transforms.ToPILImage(mode='RGB')(i) for i in images]
+    image_token_se = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN
+    if IMAGE_PLACEHOLDER in qs:
+        if vila.config.mm_use_im_start_end:
+            qs = re.sub(IMAGE_PLACEHOLDER, image_token_se, qs)
+        else:
+            qs = re.sub(IMAGE_PLACEHOLDER, DEFAULT_IMAGE_TOKEN, qs)
+    else:
+        if DEFAULT_IMAGE_TOKEN not in qs:
+            print("no <image> tag found in input. Automatically append one at the beginning of text.")
+            # do not repeatively append the prompt.
+            if vila.config.mm_use_im_start_end:
+                qs = (image_token_se + "\n") * len(images) + qs
+            else:
+                qs = (DEFAULT_IMAGE_TOKEN + "\n") * len(images) + qs
+    print("input: ", qs)
+
+    if "llama-2" in model_name.lower():
+        conv_mode = "llava_llama_2"
+    elif "v1" in model_name.lower():
+        conv_mode = "llava_v1"
+    elif "mpt" in model_name.lower():
+        conv_mode = "mpt"
+    else:
+        conv_mode = "llava_v0"
+
+
+    conv = conv_templates[conv_mode].copy()
+    conv.append_message(conv.roles[0], qs)
+    conv.append_message(conv.roles[1], None)
+    prompt = conv.get_prompt()
+    
+        
+    images_tensor = process_images(images, image_processor, vila.config).to(torch.float32)
+    input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").unsqueeze(0)
+
+    stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
+    keywords = [stop_str]
+    stopping_criteria = KeywordsStoppingCriteria(keywords, tokenizer, input_ids)
+
+    with torch.cuda.amp.autocast():
+        with torch.inference_mode():
+            output_ids = vila.generate(
+                input_ids.to(torch.float32),
+                images=[
+                    images_tensor.to(torch.float32),
+                ],
+                do_sample=True,
+                temperature=.8,
+                top_p=.97,
+                max_new_tokens=128,
+                use_cache=True,
+                stopping_criteria=[stopping_criteria],
+            )
+
+    outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0]
+    outputs = outputs.strip()
+    if outputs.endswith(stop_str):
+        outputs = outputs[: -len(stop_str)]
+    outputs = outputs.strip()
+    print(outputs)
+    return outputs
+
+############################################################################################################
 image_encoder = CLIPVisionModelWithProjection.from_pretrained("h94/IP-Adapter", subfolder="sdxl_models/image_encoder", torch_dtype=dtype, 
 device_map='cuda')
 #vae = AutoencoderTiny.from_pretrained("madebyollin/taesd", torch_dtype=dtype)
@@ -120,179 +214,101 @@ pipe.unet.fuse_qkv_projections()
 
 pipe.to(device=DEVICE)
 
-pipe.unet = torch.compile(pipe.unet)
-pipe.vae = torch.compile(pipe.vae)
-
-# VILA
-#####################################################################################################
-
-from transformers import pipeline
-
-from llava.constants import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN,
-                             DEFAULT_IMAGE_TOKEN, IMAGE_PLACEHOLDER,
-                             IMAGE_TOKEN_INDEX)
-from llava.conversation import SeparatorStyle, conv_templates
-from llava.mm_utils import (KeywordsStoppingCriteria, get_model_name_from_path,
-                            process_images, tokenizer_image_token)
-from llava.model.builder import load_pretrained_model
-from llava.utils import disable_torch_init
+#pipe.unet = torch.compile(pipe.unet)
+#pipe.vae = torch.compile(pipe.vae)
 
 
+##########################################################################################################################
+import torchaudio
+from einops import rearrange
+from stable_audio_tools import get_pretrained_model
+from stable_audio_tools.inference.generation import generate_diffusion_cond
+import os
 
-vilap = 'Efficient-Large-Model/VILA1.5-3b'
-model_name = get_model_name_from_path(vilap)
-tokenizer, vila, image_processor, context_len = load_pretrained_model(vilap, model_name, None, torch_dtype=torch.bfloat16, 
-                                                                        device=0, device_map={'':0}, 
-                                                                        use_safetensors=True,)
-vila = torch.compile(vila)
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
-@spaces.GPU()
-def eval_model(images, qs=f"<image> is bad. <image> and <image> are good. Give a one-word description of a different good image.", model_name='vicuna_v1'):
-    global vila
+os.environ['HF_TOKEN'] = "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"
 
-    images = [torchvision.transforms.ToPILImage(mode='RGB')(i) for i in images]
-    image_token_se = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN
-    if IMAGE_PLACEHOLDER in qs:
-        if vila.config.mm_use_im_start_end:
-            qs = re.sub(IMAGE_PLACEHOLDER, image_token_se, qs)
-        else:
-            qs = re.sub(IMAGE_PLACEHOLDER, DEFAULT_IMAGE_TOKEN, qs)
-    else:
-        if DEFAULT_IMAGE_TOKEN not in qs:
-            print("no <image> tag found in input. Automatically append one at the beginning of text.")
-            # do not repeatively append the prompt.
-            if vila.config.mm_use_im_start_end:
-                qs = (image_token_se + "\n") * len(images) + qs
-            else:
-                qs = (DEFAULT_IMAGE_TOKEN + "\n") * len(images) + qs
-    print("input: ", qs)
+# Download model
+audio_model, model_config = get_pretrained_model("stabilityai/stable-audio-open-1.0", )
+sample_rate = model_config["sample_rate"]
+sample_size = model_config["sample_size"]
 
-    if "llama-2" in model_name.lower():
-        conv_mode = "llava_llama_2"
-    elif "v1" in model_name.lower():
-        conv_mode = "llava_v1"
-    elif "mpt" in model_name.lower():
-        conv_mode = "mpt"
-    else:
-        conv_mode = "llava_v0"
+audio_model = audio_model.to(device)
 
+def get_audio(text):
 
-    conv = conv_templates[conv_mode].copy()
-    conv.append_message(conv.roles[0], qs)
-    conv.append_message(conv.roles[1], None)
-    prompt = conv.get_prompt()
-    
-        
-    images_tensor = process_images(images, image_processor, vila.config).to('cuda', dtype=torch.float16, )
-    input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").unsqueeze(0).cuda()
+    # Set up text and timing conditioning
+    conditioning = [{
+        "prompt": text,
+        "seconds_start": 0, 
+        "seconds_total": 8
+    }]
 
-    stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
-    keywords = [stop_str]
-    stopping_criteria = KeywordsStoppingCriteria(keywords, tokenizer, input_ids)
-
-    with torch.inference_mode():
-        output_ids = vila.generate(
-            input_ids,
-            images=[
-                images_tensor,
-            ],
-            do_sample=True,
-            temperature=.8,
-            top_p=.97,
-            max_new_tokens=128,
-            use_cache=True,
-            stopping_criteria=[stopping_criteria],
-        )
-
-    outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0]
-    outputs = outputs.strip()
-    if outputs.endswith(stop_str):
-        outputs = outputs[: -len(stop_str)]
-    outputs = outputs.strip()
-    print(outputs)
-    return outputs
-    
-    
-
-#####################################################################################################
-
-
-
-@spaces.GPU()
-def to_wanted_embs(image_outputs, input_ids, attention_mask, cache_position=None):
-    inputs_embeds = pali.get_input_embeddings()(input_ids)
-    selected_image_feature = image_outputs.to(dtype).to(device)
-    image_features = pali.multi_modal_projector(selected_image_feature)
-
-    if cache_position is None:
-        cache_position = torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device)
-    inputs_embeds, attention_mask, labels, position_ids = pali._merge_input_ids_with_image_features(
-        image_features, inputs_embeds, input_ids, attention_mask, None, None, cache_position
+    # Generate stereo audio
+    output = generate_diffusion_cond(
+        audio_model,
+        steps=20,
+        cfg_scale=7,
+        conditioning=conditioning,
+        sample_size=sample_size,
+        sigma_min=0.3,
+        sigma_max=500,
+        sampler_type="dpmpp-3m-sde",
+        device=device
     )
-    return inputs_embeds
+
+    # Rearrange audio batch to a single sequence
+    output = rearrange(output, "b d n -> d (b n)")
+
+    # Peak normalize, clip, convert to int16, and save to file
+    output = output[:, :8*sample_rate]
+    output = output.to(torch.float32).div(torch.max(torch.abs(output))).clamp(-1, 1).mul(32767).to(torch.int16).cpu()
+    name = str(uuid.uuid4()).replace("-", "")
+    path = f"/tmp/{name}.mp4"
     
-
-# TODO cache descriptions?
-@spaces.GPU()
-def generate_pali(n_embs):
-    prompt = 'caption en'
-    model_inputs = processor(text=prompt, images=torch.zeros(1, 3, 224, 224), return_tensors="pt")
-    # we need to get im_embs taken in here.
-    
-    descs = ''
-    for n, emb in enumerate(n_embs):
-        if n < len(n_embs)-1:
-            input_len = model_inputs["input_ids"].shape[-1]
-            input_embeds = to_wanted_embs(emb, 
-                                model_inputs["input_ids"].to(device), 
-                                model_inputs["attention_mask"].to(device))
-            generation = pali.generate(max_new_tokens=20, do_sample=True, top_p=.94, temperature=1.2, inputs_embeds=input_embeds)
-            decoded = processor.decode(generation[0], skip_special_tokens=True, clean_up_tokenization_spaces=True)
-            descs += f'Description: {decoded}\n'
-        else:
-            prompt = f'en {descs} Describe a new image that is similar. Description: '
-            print(prompt)
-            model_inputs = processor(text=prompt, images=torch.zeros(1, 3, 224, 224), return_tensors="pt")
-            input_len = model_inputs["input_ids"].shape[-1]
-            input_embeds = to_wanted_embs(emb, 
-                                model_inputs["input_ids"].to(device), 
-                                model_inputs["attention_mask"].to(device))
-            generation = pali.generate(max_new_tokens=20, do_sample=True, top_p=.94, temperature=1.2, inputs_embeds=input_embeds)
-            decoded = processor.decode(generation[0], skip_special_tokens=True, clean_up_tokenization_spaces=True)
-    
-    return decoded
+    torchaudio.save(path, output, sample_rate)
+    return path
 
 
-#############################################################
 
 
+
+
+##########################################################################################################################
+
+from safety_checker_improved import maybe_nsfw
 
 @spaces.GPU()
 def generate_gpu(in_im_embs, prompt='the scene'):
     with torch.no_grad():
         in_im_embs = in_im_embs.to('cuda').unsqueeze(0).unsqueeze(0)
+        print(prompt, in_im_embs, STEPS, 'inpu')
         output = pipe(prompt=prompt, guidance_scale=1, added_cond_kwargs={}, ip_adapter_image_embeds=[in_im_embs], num_inference_steps=STEPS,)
+        print(output, 'outpu')
         im_emb, _ = pipe.encode_image(
                     output.frames[0][len(output.frames[0])//2], 'cuda', 1, output_hidden_state
                 )
-    return output, im_emb
+        audio = get_audio(prompt)
+    return output, im_emb, audio
 
 
 def generate(in_im_embs, prompt='the scene'):
-    output, im_emb = generate_gpu(in_im_embs, prompt)
-    nsfw =maybe_nsfw(output.frames[0][len(output.frames[0])//2])
+    output, im_emb, audio = generate_gpu(in_im_embs, prompt)
+    nsfw = maybe_nsfw(output.frames[0][len(output.frames[0])//2])
     name = str(uuid.uuid4()).replace("-", "")
     path = f"/tmp/{name}.mp4"
     
     if nsfw:
         gr.Warning("NSFW content detected.")
         # TODO could return an automatic dislike of auto dislike on the backend for neither as well; just would need refactoring.
-        return None, im_emb
+        return None, im_emb, audio
     
     
     output.frames[0] = output.frames[0] + list(reversed(output.frames[0]))
     write_video(path, output.frames[0])
-    return path, im_emb
+    
+    return path, im_emb, audio
 
 
 #######################
@@ -356,7 +372,11 @@ def pluck_img(user_id, user_emb):
             best_row = i[1]
     img = best_row['paths']
     text = best_row.get('text', '')
-    return img, text
+    audio = best_row.get('audio')
+    print(audio)
+    if not isinstance(audio, str) or audio == 'nan':
+        audio = None
+    return img, text, audio
 
 
 def background_next_image():
@@ -407,15 +427,17 @@ def background_next_image():
                 image = image[len(image)//2]
                 ims.append(image)
             text = eval_model(ims)
-            img, embs = generate(user_emb, text)
+            img, embs, audio = generate(user_emb, text)
             
             if img:
-                tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'latest_user_to_rate', 'text', ])
+                tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'latest_user_to_rate', 'text', 'audio'])
                 tmp_df['paths'] = [img]
                 tmp_df['embeddings'] = [embs.detach().to(device='cpu', dtype=torch.float32)]
                 tmp_df['user:rating'] = [{' ': ' '}]
                 tmp_df['from_user_id'] = [uid]
                 tmp_df['text'] = [text]
+                tmp_df['audio'] = [audio]
+                
                 prevs_df = pd.concat((prevs_df, tmp_df))
                 # we can free up storage by deleting the image
                 if len(prevs_df) > 500:
@@ -447,18 +469,18 @@ def next_image(calibrate_prompts, user_id):
         if len(calibrate_prompts) > 0:
             cal_video = calibrate_prompts.pop(0)
             image = prevs_df[prevs_df['paths'] == cal_video]['paths'].to_list()[0]
-            return image, calibrate_prompts, ''
+            return image, calibrate_prompts, '', None
         else:
             embs, ys = pluck_embs_ys(user_id)
             user_emb = get_user_emb(embs, ys) * 3
-            image, text = pluck_img(user_id, user_emb)
-            return image, calibrate_prompts, text
+            image, text, audio = pluck_img(user_id, user_emb)
+            return image, calibrate_prompts, text, audio
 
 
 
 def start(_, calibrate_prompts, user_id, request: gr.Request):
     user_id = int(str(time.time())[-7:].replace('.', ''))
-    image, calibrate_prompts, text = next_image(calibrate_prompts, user_id)
+    image, calibrate_prompts, text, audio = next_image(calibrate_prompts, user_id)
     return [
             gr.Button(value='Like (L)', interactive=True), 
             gr.Button(value='Neither (Space)', interactive=True, visible=False), 
@@ -466,7 +488,8 @@ def start(_, calibrate_prompts, user_id, request: gr.Request):
             gr.Button(value='Start', interactive=False),
             image,
             calibrate_prompts,
-            user_id
+            user_id,
+            None
             ]
 
 
@@ -477,7 +500,7 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
     if choice == 'Like (L)':
         choice = 1
     elif choice == 'Neither (Space)':
-        img, calibrate_prompts, text = next_image(calibrate_prompts, user_id)
+        img, calibrate_prompts, text, audio = next_image(calibrate_prompts, user_id)
         return img, calibrate_prompts, text
     else:
         choice = 0
@@ -493,8 +516,8 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
     if len(prevs_df.loc[row_mask, 'user:rating']) > 0:
         prevs_df.loc[row_mask, 'user:rating'][0][user_id] = choice
         prevs_df.loc[row_mask, 'latest_user_to_rate'] = [user_id]
-    img, calibrate_prompts, text = next_image(calibrate_prompts, user_id)
-    return img, calibrate_prompts, text
+    img, calibrate_prompts, text, audio = next_image(calibrate_prompts, user_id)
+    return img, calibrate_prompts, text, audio
 
 css = '''.gradio-container{max-width: 700px !important}
 #description{text-align: center}
@@ -579,6 +602,7 @@ Explore the latent space without text prompts based on your preferences. Learn m
        )
         img.play(l, js='''document.querySelector('[data-testid="Lightning-player"]').loop = true''')
     with gr.Row():
+        audio = gr.Audio(interactive=False, visible=True, label='Audio', autoplay=True)
         text = gr.Textbox(interactive=False, visible=False, label='Text')
     with gr.Row(equal_height=True):
         b3 = gr.Button(value='Dislike (A)', interactive=False, elem_id="dislike")
@@ -587,23 +611,23 @@ Explore the latent space without text prompts based on your preferences. Learn m
         b1.click(
         choose, 
         [img, b1, calibrate_prompts, user_id],
-        [img, calibrate_prompts, text],
+        [img, calibrate_prompts, text, audio],
         )
         b2.click(
         choose, 
         [img, b2, calibrate_prompts, user_id],
-        [img, calibrate_prompts, text],
+        [img, calibrate_prompts, text, audio],
         )
         b3.click(
         choose, 
         [img, b3, calibrate_prompts, user_id],
-        [img, calibrate_prompts, text],
+        [img, calibrate_prompts, text, audio],
         )
     with gr.Row():
         b4 = gr.Button(value='Start')
         b4.click(start,
                  [b4, calibrate_prompts, user_id],
-                 [b1, b2, b3, b4, img, calibrate_prompts, user_id]
+                 [b1, b2, b3, b4, img, calibrate_prompts, user_id, audio]
                  )
     with gr.Row():
         html = gr.HTML('''<div style='text-align:center; font-size:20px'>You will calibrate for several videos and then roam. </ div><br><br><br>

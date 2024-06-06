@@ -42,14 +42,12 @@ def load_pretrained_model(
     model_base=None,
     load_8bit=False,
     load_4bit=False,
-    device_map="auto",
-    device="cuda",
+    device_map=None,
+    device='cuda',
     **kwargs,
 ):
-    kwargs = {"device_map": device_map, **kwargs}
-
-    if device != "cuda":
-        kwargs["device_map"] = {"": device}
+    
+    kwargs["device_map"] = {"": 0}#
 
     if load_8bit:
         kwargs["load_in_8bit"] = True
@@ -191,7 +189,7 @@ def load_pretrained_model(
                 model_base, low_cpu_mem_usage=True, **kwargs
             )
             print(f"Loading LoRA weights from {model_path}")
-            model = PeftModel.from_pretrained(model, model_path)
+            model = PeftModel.from_pretrained(model, model_path, device_map={"": 0})
             print(f"Merging weights")
             model = model.merge_and_unload()
             print("Convert to FP16...")
@@ -257,4 +255,4 @@ def prepare_config_for_eval(config: PretrainedConfig, kwargs: dict):
     # siglip does not support device_map = "auto"
     vision_tower_name = parse_model_name_or_path(config, "vision_tower")
     if "siglip" in vision_tower_name.lower():
-        kwargs["device_map"] = "cuda"
+        kwargs["device_map"] = {"": 0}
