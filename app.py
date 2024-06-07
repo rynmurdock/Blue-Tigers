@@ -3,13 +3,14 @@
 import torch
 
 # lol
-DO_COMPILE = False
+DO_COMPILE = True
 DEVICE = 'cuda'
 STEPS = 6
-output_hidden_state = False
 device = "cuda"
 dtype = torch.bfloat16
 N_IMG_EMBS = 3
+
+output_hidden_state = False
 
 import logging
 import os
