@@ -1,11 +1,9 @@
 
 
-# TODO unify/merge origin and this
-# TODO save & restart from (if it exists) dataframe parquet
-
 import torch
 
 # lol
+DO_COMPILE = False
 DEVICE = 'cuda'
 STEPS = 6
 output_hidden_state = False
@@ -26,14 +24,22 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import random
 import time
 from PIL import Image
-
-
+import pyarrow as pa
+import ast
 
 torch.set_grad_enabled(False)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
-prevs_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'latest_user_to_rate', 'from_user_id', 'text', 'audio'])
+loaded = False
+if os.path.exists('dataframe.parquet'):
+    prevs_df = pd.read_parquet('dataframe.parquet')
+    prevs_df['user:rating'] = [ast.literal_eval(i) for i in prevs_df['user:rating']]
+    loaded = True
+else:
+    prevs_df = pd.DataFrame(columns=['paths', 'embeddings', 'user:rating', 'latest_user_to_rate', 'from_user_id', 'text', 'audio'])
+
+print('df:', prevs_df['user:rating'])
 
 import spaces
 start_time = time.time()
@@ -113,7 +119,9 @@ model_name = get_model_name_from_path(vilap)
 tokenizer, vila, image_processor, context_len = load_pretrained_model(vilap, model_name, None, torch_dtype=torch.bfloat16, 
                                                                         device=0,
                                                                         use_safetensors=True, load_8bit=True)
-vila = torch.compile(vila)
+
+if DO_COMPILE:
+    vila = torch.compile(vila)
 ############################################################################################################
 @spaces.GPU()
 def eval_model(images, qs=f"<image> is bad. <image> and <image> are good. Give a one-word description of a different good image.", model_name='vicuna_v1'):
@@ -223,8 +231,9 @@ pipe.unet.fuse_qkv_projections()
 
 pipe.to(device=DEVICE)
 
-pipe.unet = torch.compile(pipe.unet)
-pipe.vae = torch.compile(pipe.vae)
+if DO_COMPILE:
+    pipe.unet = torch.compile(pipe.unet)
+    pipe.vae = torch.compile(pipe.vae)
 
 
 ##########################################################################################################################
@@ -244,7 +253,9 @@ sample_rate = model_config["sample_rate"]
 sample_size = model_config["sample_size"]
 
 audio_model = audio_model.to(device)
-audio_model = torch.compile(audio_model)
+
+if DO_COMPILE:
+    audio_model = torch.compile(audio_model)
 
 def get_audio(text):
 
@@ -370,14 +381,14 @@ def get_user_emb(embs, ys):
 
 def pluck_img(user_id, user_emb):
     not_rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, 'gone') == 'gone' for i in prevs_df.iterrows()]]
-    while len(not_rated_rows) == 0: # TODO try just returning, less logs?
+    while len(not_rated_rows) == 0:
         not_rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, 'gone') == 'gone' for i in prevs_df.iterrows()]]
         time.sleep(.001)
     # TODO optimize this lol
     best_sim = -100000
     for i in not_rated_rows.iterrows():
         # TODO sloppy .to but it is 3am.
-        sim = torch.cosine_similarity(i[1]['embeddings'].detach().to('cpu'), user_emb.detach().to('cpu'))
+        sim = torch.cosine_similarity(torch.tensor(i[1]['embeddings']), user_emb.detach().to('cpu'))
         if sim > best_sim:
             best_sim = sim
             best_row = i[1]
@@ -393,14 +404,13 @@ def background_next_image():
         global prevs_df
         # only let it get N (maybe 3) ahead of the user
         #not_rated_rows = prevs_df[[i[1]['user:rating'] == {' ': ' '} for i in prevs_df.iterrows()]]
-        rated_rows = prevs_df[[i[1]['user:rating'] != {' ': ' '} for i in prevs_df.iterrows()]]
-        while len(rated_rows) < 5:
-        #    not_rated_rows = prevs_df[[i[1]['user:rating'] == {' ': ' '} for i in prevs_df.iterrows()]]
-            rated_rows = prevs_df[[i[1]['user:rating'] != {' ': ' '} for i in prevs_df.iterrows()]]
-            time.sleep(.01)
+        rated_rows = prevs_df[[i[1]['user:rating'] != {0: 0} for i in prevs_df.iterrows()]]
+        if len(rated_rows) < 5:
+            return
 
         user_id_list = set(rated_rows['latest_user_to_rate'].to_list())
         for uid in user_id_list:
+            # as in rated by them
             rated_rows = prevs_df[[i[1]['user:rating'].get(uid, None) is not None for i in prevs_df.iterrows()]]
             not_rated_rows = prevs_df[[i[1]['user:rating'].get(uid, None) is None for i in prevs_df.iterrows()]]
             
@@ -408,16 +418,22 @@ def background_next_image():
             #   media. 
             
             unrated_from_user = not_rated_rows[[i[1]['from_user_id'] == uid for i in not_rated_rows.iterrows()]]
+            # as in from user's embedding
             rated_from_user = rated_rows[[i[1]['from_user_id'] == uid for i in rated_rows.iterrows()]]
+            
+            
 
             # we pop previous ratings if there are > n
             if len(rated_from_user) >= 25:
                 oldest = rated_from_user.iloc[0]['paths']
+                # TODO pop with most negative ratings instead of oldest.
                 prevs_df = prevs_df[prevs_df['paths'] != oldest]
             # we don't compute more after n are in the queue for them
             if len(unrated_from_user) >= 20:
                 continue
             
+            if len(rated_rows) < 4:
+                continue
             embs, ys = pluck_embs_ys(uid)
             user_emb = get_user_emb(embs, ys) * 3
             
@@ -441,10 +457,10 @@ def background_next_image():
             img, embs, audio = generate(user_emb, text)
             
             if img:
-                tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'latest_user_to_rate', 'text', 'audio'])
+                tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'user:rating', 'from_user_id', 'latest_user_to_rate', 'text', 'audio',])
                 tmp_df['paths'] = [img]
-                tmp_df['embeddings'] = [embs.detach().to(device='cpu', dtype=torch.float32)]
-                tmp_df['user:rating'] = [{' ': ' '}]
+                tmp_df['embeddings'] = [embs.detach().to(device='cpu', dtype=torch.float32).squeeze().numpy()]
+                tmp_df['user:rating'] = [{0: 0}]
                 tmp_df['from_user_id'] = [uid]
                 tmp_df['text'] = [text]
                 tmp_df['audio'] = [audio]
@@ -452,6 +468,7 @@ def background_next_image():
                 prevs_df = pd.concat((prevs_df, tmp_df))
                 # we can free up storage by deleting the image
                 if len(prevs_df) > 500:
+                    # TODO delete least-liked or most-disliked; TODO could do this agressively or check when a new rating comes in for > 2/3 dislikes
                     oldest_path = prevs_df.iloc[6]['paths']
                     if os.path.isfile(oldest_path):
                         os.remove(oldest_path)
@@ -460,7 +477,16 @@ def background_next_image():
                         print("Error: %s file not found" % oldest_path)
                     # only keep 50 images & embeddings & ips, then remove oldest besides calibrating
                     prevs_df = pd.concat((prevs_df.iloc[:6], prevs_df.iloc[7:]))
-    
+                prevs_df_tmp = prevs_df.copy()
+                prevs_df_tmp['user:rating'] = prevs_df_tmp['user:rating'].astype(str)
+                prevs_df_tmp.to_parquet('dataframe.parquet', engine='pyarrow', schema=pa.schema({"embeddings": pa.list_(pa.float64()), 
+                                                                                             'text': pa.string(),
+                                                                                             'audio': pa.string(),
+                                                                                             'paths': pa.string(),
+                                                                                             'user:rating': pa.string(),
+                                                                                             'latest_user_to_rate': pa.int32(),
+                                                                                             'from_user_id': pa.int32(),
+                                                                                             }))
 
 def pluck_embs_ys(user_id):
     rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, None) != None for i in prevs_df.iterrows()]]
@@ -471,8 +497,8 @@ def pluck_embs_ys(user_id):
     #    time.sleep(.01)
     #    print('current user has 0 not_rated_rows')
     
-    embs = rated_rows['embeddings'].to_list()
-    ys = [i[user_id] for i in rated_rows['user:rating'].to_list()]
+    embs = [torch.tensor(i) for i in rated_rows['embeddings'].to_list()]
+    ys = [i[user_id] for i in rated_rows['user:rating']]
     return embs, ys
 
 def next_image(calibrate_prompts, user_id):
@@ -524,8 +550,8 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
     
     row_mask = [p.split('/')[-1] in img for p in prevs_df['paths'].to_list()]
     # if it's still in the dataframe, add the choice
-    if len(prevs_df.loc[row_mask, 'user:rating']) > 0:
-        prevs_df.loc[row_mask, 'user:rating'][0][user_id] = choice
+    if len(prevs_df.loc[row_mask]) > 0:
+        prevs_df['user:rating'][row_mask].iloc[0][user_id] = choice
         prevs_df.loc[row_mask, 'latest_user_to_rate'] = [user_id]
     img, calibrate_prompts, text, audio = next_image(calibrate_prompts, user_id)
     return img, calibrate_prompts, text, None
@@ -590,16 +616,17 @@ Explore the latent space without text prompts based on your preferences. Learn m
     ''', elem_id="description")
     user_id = gr.State()
     # calibration videos -- this is a misnomer now :D
-    calibrate_prompts = gr.State([
+    cal_listy = [
     './first.mp4',
     './second.mp4',
     './third.mp4',
     './fourth.mp4',
     './fifth.mp4',
     './sixth.mp4',
-    ])
+    ]
+    random.shuffle(cal_listy)
+    calibrate_prompts = gr.State(cal_listy)
     def l(audio):
-        print(audio)
         return audio
 
     with gr.Row(elem_id='output-image'):
@@ -658,27 +685,35 @@ scheduler = BackgroundScheduler()
 scheduler.add_job(func=background_next_image, trigger="interval", seconds=.5)
 scheduler.start()
 
+# TODO calibration videos should be just like any others after they've been used up (make global); let users start randomly (at least shorten & diversify)
 
-# prep our calibration videos
-for im in [
-    './first.mp4',
-    './second.mp4',
-    './third.mp4',
-    './fourth.mp4',
-    './fifth.mp4',
-    './sixth.mp4',
-    './seventh.mp4',
-    './eigth.mp4',
-    './ninth.mp4',
-    './tenth.mp4',
-    ]:
-    tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'text',])
-    tmp_df['paths'] = [im]
-    image = list(imageio.imiter(im))
-    image = image[len(image)//2]
-    tmp_df['embeddings'] = [torch.load(im.replace('mp4', 'im_.pt'))]
-    tmp_df['user:rating'] = [{' ': ' '}]
-    prevs_df = pd.concat((prevs_df, tmp_df))
+
+if not loaded:
+    # prep our calibration videos
+    for im in [
+        './first.mp4',
+        './second.mp4',
+        './third.mp4',
+        './fourth.mp4',
+        './fifth.mp4',
+        './sixth.mp4',
+        './seventh.mp4',
+        './eigth.mp4',
+        './ninth.mp4',
+        './tenth.mp4',
+        ]:
+        tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'user:rating', 'latest_user_to_rate', 'from_user_id', 'text', 'audio'])
+        tmp_df['paths'] = [im]
+        image = list(imageio.imiter(im))
+        image = image[len(image)//2]
+        tmp_df['embeddings'] = [torch.load(im.replace('mp4', 'im_.pt')).squeeze().numpy()]
+        tmp_df['user:rating'] = [{0: 0}]
+        tmp_df['latest_user_to_rate'] = [0]
+        tmp_df['from_user_id'] = [0]
+        tmp_df['text'] = ['']
+        tmp_df['audio'] = ['']
+        # NOT CONCATENATING BECAUSE WE HAVE THEM ALREADY
+        prevs_df = pd.concat((prevs_df, tmp_df))
 
 if __name__ == "__main__":
     demo.launch(share=True, server_port=8443)
