@@ -56,6 +56,16 @@ import uuid
 import av
 import torchvision
 
+
+
+@spaces.GPU()
+def solver(embs, ys):
+    sol = torch.linalg.solve_ex(ys.to(device, dtype=dtype), embs.to(device, dtype=dtype))
+    return sol.to('cpu', dtype=torch.float32)
+
+
+
+
 def write_video(audio_name, file_name, images, fps=17):
     container = av.open(file_name, mode="w")
     
@@ -368,11 +378,11 @@ def get_user_emb(embs, ys):
     
     if feature_embs.norm() != 0:
         feature_embs = feature_embs / feature_embs.norm()
-    
-    #lin_class = Ridge(fit_intercept=False).fit(feature_embs, chosen_y)
-    #class_weight='balanced'
-    lin_class = SVC(max_iter=500, kernel='linear', C=.1, ).fit(feature_embs.squeeze(), chosen_y)
-    coef_ = torch.tensor(lin_class.coef_, dtype=torch.float32).detach().to('cpu')
+
+    # TODO test with regression (esp standardize inputs)
+    uemb = solver(feature_embs.squeeze(), chosen_y)
+    print(uemb.shape)
+    coef_ = torch.tensor(uemb, dtype=torch.float32).detach().to('cpu')
     coef_ = coef_ / coef_.abs().max()
 
     w = 1# if len(embs) % 2 == 0 else 0
