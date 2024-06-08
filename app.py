@@ -3,7 +3,7 @@
 import torch
 
 # lol
-DO_LOAD = False
+DO_LOAD = True
 AUDIO = False
 DO_COMPILE = False
 DEVICE = 'cuda'
@@ -385,10 +385,10 @@ def get_user_emb(embs, ys):
     # sample only as many negatives as there are positives
     pos_indices = [i for i in indices if ys[i] > 0]
     neg_indices = [i for i in indices if ys[i] < 0]
-    #lower = min(len(pos_indices), len(neg_indices))
-    #neg_indices = random.sample(neg_indices, lower)
-    #pos_indices = random.sample(pos_indices, lower)
-    
+    lower = min(len(pos_indices), len(neg_indices))
+    neg_indices = random.sample(neg_indices, lower)
+    pos_indices = random.sample(pos_indices, lower)
+    indices = neg_indices + pos_indices
     
     # we may have just encountered a rare multi-threading diffusers issue (https://github.com/huggingface/diffusers/issues/5749);
     # this ends up adding a rating but losing an embedding, it seems.
@@ -416,17 +416,23 @@ def get_user_emb(embs, ys):
 
 def pluck_img(user_id, user_emb):
     not_rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, 'gone') == 'gone' for i in prevs_df.iterrows()]]
+    not_rated_from_user = not_rated_rows[[i[1]['from_user_id'] == user_id for i in not_rated_rows.iterrows()]]
     while len(not_rated_rows) == 0:
         not_rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, 'gone') == 'gone' for i in prevs_df.iterrows()]]
         time.sleep(.001)
-    # TODO optimize this lol
-    best_sim = -np.inf
-    for i in not_rated_rows.iterrows():
-        # TODO sloppy .to but it is 3am.
-        sim = torch.cosine_similarity(torch.tensor(i[1]['embeddings']), user_emb.detach().to('cpu'))
-        if sim > best_sim:
-            best_sim = sim
-            best_row = i[1]
+    # Prioritize rows that are from their embedding but not rated
+    if len(not_rated_from_user) > 0:
+        best_row = not_rated_from_user.iloc[0]
+    # Otherwise, provide the topk from all items
+    else:
+        # TODO optimize this lol
+        best_sim = -np.inf
+        for i in not_rated_rows.iterrows():
+            # TODO sloppy .to but it is 3am.
+            sim = torch.cosine_similarity(torch.tensor(i[1]['embeddings']), user_emb.detach().to('cpu'))
+            if sim > best_sim:
+                best_sim = sim
+                best_row = i[1]
     img = best_row['paths']
     text = best_row.get('text', '')
     audio = best_row.get('audio')
@@ -474,7 +480,7 @@ def background_next_image():
             
             
             pos_mask = [i[uid] > 0 for i in rated_rows['user:rating'].to_list()]
-            neg_mask = [i[uid] < 0 for i in rated_rows['user:rating'].to_list()]
+            neg_mask = [i[uid] <= 0 for i in rated_rows['user:rating'].to_list()]
             paths_pos_from_user = rated_rows[pos_mask]['paths'].to_list()
             paths_neg_from_user= rated_rows[neg_mask]['paths'].to_list()
             
