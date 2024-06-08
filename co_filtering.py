@@ -2,9 +2,9 @@ import torch
 import pandas as pd
 
 
+DEVICE = 'cpu'
 
-
-
+# TODO can test with just the df, so import and run in python console
 
 # From https://alexhwilliams.info/itsneuronalblog/2018/02/26/censored-lstsq/
 def censored_lstsq(A, B, M):
@@ -30,53 +30,143 @@ def censored_lstsq(A, B, M):
     #   return np.linalg.lstsq(A[M.to(torch.long)], B[M.to(torch.long)])[0]
 
     # else solve via tensor representation
-    rhs = torch.dot(A.T, M * B).T[:,:,None] # n x r x 1 tensor
+    rhs = torch.mm(A.T, M * B).T[:,:,None] # n x r x 1 tensor
     T = torch.matmul(A.T[None,:,:], M.T[:,:,None] * A[None,:,:]) # n x r x r tensor
-    res = torch.linalg.lstsq(T.to('cuda'), torch.from_numpy(rhs).to('cuda'))
-    return res.solution.to('cpu').squeeze().T # transpose to get r x n
+    res = torch.linalg.lstsq(T.to(DEVICE), rhs.to(DEVICE))
+    return res.solution.squeeze().T # transpose to get r x n
 
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-def alternating_l_sq(interactions, clip_item_embs, epochs=8):
-    user_embs = torch.randn(interactions.shape[0], 1280, dtype=torch.bfloat16, device='cuda')
-    item_embs = torch.randn(interactions.shape[0], 1280, dtype=torch.bfloat16, device='cuda')
-
-    interactions = torch.cat(interactions, clip_positives) 
-    # see generativerecsys original repo for correct concat, zeroing, etc.
-    # we can test by replacing SVC in the singular calc as well...
-    # may want to add an l2 term, but then I think we're best off just using ridge?
+def alternating_l_sq(interactions, clip_item_embs, mask, match_images, epochs=4):
+    user_embs = torch.randn(interactions.shape[0], 1280, dtype=torch.bfloat16, device=DEVICE)
+    item_embs = clip_item_embs.clone()
+    
+    interactions = (interactions - interactions.mean())
+    if interactions.abs().max() != 0:
+        interactions = interactions / interactions.abs().max()
+    
+    print(f'''Shapes:
+        Interactions: {interactions.shape}
+        Image_features: {item_embs.shape}
+        User_features: {user_embs.shape}
+        Mask: {mask.shape}
+        Clip_item_embs: {clip_item_embs.shape}
+        ''')
 
     for ep in range(epochs):
-        item_embs = torch.linalg.solve_ex(interactions, user_embs)
-        user_embs = torch.linalg.solve_ex(interactions, item_embs)
+        item_embs = censored_lstsq(torch.cat([user_embs, clip_item_embs]), 
+             torch.cat([interactions, match_images]),
+             torch.cat([mask, match_images])).T
+        user_embs = censored_lstsq(item_embs, interactions.T, mask.T).T
+        print(f'Epoch {ep}.')
+        
     # we should obtain a training loss metric; could even holdout a val set instead of eyeballing
     return user_embs
 
-def update_all_embeddings(df, all_user_embs=None):
-    # starting with all but could shard for user's history & update
+@torch.no_grad()
+def all_embeddings(df, uid):
+    # calculate user embeddings; should return the whole thing & run every x ratings, but will do one user for now.
+    
+    # could shard for user's history & update?
     # initialize all user & item embeddings with kept old for faster convergence?
-    clip_item_embs = df['embeddings']
-    user_ids = # collate all users from user:rating
-               # create interactions matrix from there
-               # probably should have a separate user emb matrix -- gotta be better ways lol
-    for uid in 
-    interactions = # do that thing with masking if you can;
-                   #    otherwise you may want to calc by users so you can drop unseen
-                   #    or use weighting, but that's implicit unnecessarily
+    clip_item_embs = torch.tensor(df['embeddings'].to_list()).to(DEVICE).to(torch.float32)
+    
+    rated_rows_all = df[[i[1]['user:rating'] != {0: 0} for i in df.iterrows()]]
+    
+    users = []
+    for i in rated_rows_all.iterrows():
+        row = i[1]
+        users += row['user:rating'].keys()
+    users = list(set(users))
+    
+    interactions_matrix = torch.zeros(len(users), clip_item_embs.shape[0], device=DEVICE)
+    for n_u, u in enumerate(users):
+        for n_emb, row in rated_rows_all.iterrows():
+            # -1 indicates unseen, otherwise gets rating
+            rating = row['user:rating'].get(u, -1)
+            interactions_matrix[n_u, n_emb] = rating
+    mask = torch.ones_like(interactions_matrix)
+    # mask unseen; we can weight by frequency by dividing later
+    mask[interactions_matrix == -1] = 0
+    mask.to(DEVICE)
+    
+    match_images = torch.zeros(clip_item_embs.shape[0], clip_item_embs.shape[0])
+    match_images = match_images.fill_diagonal_(1).to(DEVICE)
+    
+    # use weighting?
+    user_embs = alternating_l_sq(interactions_matrix, clip_item_embs, mask, match_images)
+    user_emb = user_embs[[uid == u for u in users]]    
+    
+
+    return user_emb.to('cuda', dtype=torch.bfloat16) # easy to pluck
 
 
-    return user_embeddings, item_embeddings # easy to pluck
+
+
+
+def uid_embeddings(df, uid):
+    # calculate user embeddings; should return the whole thing & run every x ratings, but will do one user for now.
+    
+    # could shard for user's history & update?
+    # initialize all user & item embeddings with kept old for faster convergence?
+    
+    rated_rows_all = df[[i[1]['user:rating'] != {0: 0} for i in df.iterrows()]]
+    rated_from_user = rated_rows_all[[i[1]['user:rating'].get(uid, 'gone') != 'gone' for i in rated_rows_all.iterrows()]].reset_index()
+    clip_item_embs = torch.tensor(rated_from_user['embeddings'].to_list()).to(DEVICE).to(torch.float32)
+    
+    print(rated_from_user)
+    
+    users = []
+    for i in rated_from_user.iterrows():
+        row = i[1]
+        users += row['user:rating'].keys()
+    users = list(set(users))
+    
+    interactions_matrix = torch.zeros(len(users), clip_item_embs.shape[0], device=DEVICE)
+    for n_u, u in enumerate(users):
+        for n_emb, row in rated_from_user.iterrows():
+            # -1 indicates unseen, otherwise gets rating
+            rating = row['user:rating'].get(u, -1)
+            interactions_matrix[n_u, n_emb] = rating
+    mask = torch.ones_like(interactions_matrix)
+    # mask unseen; we can weight by frequency by dividing later
+    mask[interactions_matrix == -1] = 0
+    mask.to(DEVICE)
+    
+    match_images = torch.zeros(clip_item_embs.shape[0], clip_item_embs.shape[0])
+    match_images = match_images.fill_diagonal_(1).to(DEVICE)
+    
+    # use weighting?
+    user_embs = alternating_l_sq(interactions_matrix, clip_item_embs, mask, match_images)
+    user_emb = user_embs[[uid == u for u in users]]    
+    
+
+    return user_emb.to('cuda', dtype=torch.bfloat16) # easy to pluck
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 

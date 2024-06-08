@@ -34,7 +34,7 @@ torch.set_grad_enabled(False)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
-
+from co_filtering import all_embeddings, uid_embeddings
 
 
 loaded = False
@@ -414,18 +414,21 @@ def get_user_emb(embs, ys):
     return im_emb
 
 
-def pluck_img(user_id, user_emb):
+def pluck_img(user_id):
+    # TODO maybe rework these iterrows; can't they be super simple?
     not_rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, 'gone') == 'gone' for i in prevs_df.iterrows()]]
-    not_rated_from_user = not_rated_rows[[i[1]['from_user_id'] == user_id for i in not_rated_rows.iterrows()]]
+    not_rated_from_user = not_rated_rows[not_rated_rows['from_user_id'] == user_id]
     while len(not_rated_rows) == 0:
         not_rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, 'gone') == 'gone' for i in prevs_df.iterrows()]]
         time.sleep(.001)
     # Prioritize rows that are from their embedding but not rated
     if len(not_rated_from_user) > 0:
+        print('YEEEEHAAAAWYEEEEHAAAAWYEEEEHAAAAWYEEEEHAAAAWYEEEEHAAAAWYEEEEHAAAAWYEEEEHAAAAW')
         best_row = not_rated_from_user.iloc[0]
     # Otherwise, provide the topk from all items
     else:
-        # TODO optimize this lol
+        user_emb = uid_embeddings(prevs_df, user_id) * 3 # TODO where do we scale? lol
+        # TODO optimize this to a matmul & topk lol
         best_sim = -np.inf
         for i in not_rated_rows.iterrows():
             # TODO sloppy .to but it is 3am.
@@ -475,8 +478,8 @@ def background_next_image():
             
             if len(rated_rows) < 4:
                 continue
-            embs, ys = pluck_embs_ys(uid)
-            user_emb = get_user_emb(embs, ys) * 3
+            
+            user_emb = uid_embeddings(prevs_df, uid) * 3
             
             
             pos_mask = [i[uid] > 0 for i in rated_rows['user:rating'].to_list()]
@@ -549,9 +552,7 @@ def next_image(calibrate_prompts, user_id):
             image = prevs_df[prevs_df['paths'] == cal_video]['paths'].to_list()[0]
             return image, calibrate_prompts, '', None
         else:
-            embs, ys = pluck_embs_ys(user_id)
-            user_emb = get_user_emb(embs, ys) * 3
-            image, text, audio = pluck_img(user_id, user_emb)
+            image, text, audio = pluck_img(user_id)
             return image, calibrate_prompts, text, audio
 
 
