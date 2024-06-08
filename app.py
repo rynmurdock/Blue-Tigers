@@ -427,7 +427,7 @@ def pluck_img(user_id):
         best_row = not_rated_from_user.iloc[0]
     # Otherwise, provide the topk from all items
     else:
-        user_emb = uid_embeddings(prevs_df, user_id) * 3 # TODO where do we scale? lol
+        user_emb = uid_embeddings(prevs_df, user_id)# * 3 # put back? TODO
         # TODO optimize this to a matmul & topk lol
         best_sim = -np.inf
         for i in not_rated_rows.iterrows():
@@ -452,6 +452,7 @@ def background_next_image():
         if len(rated_rows) < 5:
             return
 
+        # sort descending? pd unique and from latest row up.
         user_id_list = set(rated_rows['latest_user_to_rate'].to_list())
         for uid in user_id_list:
             # as in rated by them
@@ -479,7 +480,7 @@ def background_next_image():
             if len(rated_rows) < 4:
                 continue
             
-            user_emb = uid_embeddings(prevs_df, uid) * 3
+            user_emb = uid_embeddings(prevs_df, uid)# * 3 # TODO put back?
             
             
             pos_mask = [i[uid] > 0 for i in rated_rows['user:rating'].to_list()]

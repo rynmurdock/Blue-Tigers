@@ -2,6 +2,10 @@ import torch
 import pandas as pd
 
 
+# TODO test; frequency? etc
+# TODO compare user_emb and item_embs to original CLIP embedding
+
+
 DEVICE = 'cpu'
 
 # TODO can test with just the df, so import and run in python console
@@ -55,10 +59,12 @@ def alternating_l_sq(interactions, clip_item_embs, mask, match_images, epochs=4)
         ''')
 
     for ep in range(epochs):
+        user_embs = censored_lstsq(item_embs, interactions.T, mask.T).T
+        if ep == epochs - 1:
+            break
         item_embs = censored_lstsq(torch.cat([user_embs, clip_item_embs]), 
              torch.cat([interactions, match_images]),
              torch.cat([mask, match_images])).T
-        user_embs = censored_lstsq(item_embs, interactions.T, mask.T).T
         print(f'Epoch {ep}.')
         
     # we should obtain a training loss metric; could even holdout a val set instead of eyeballing
