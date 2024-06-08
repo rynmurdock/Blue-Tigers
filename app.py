@@ -3,7 +3,9 @@
 import torch
 
 # lol
-DO_COMPILE = True
+DO_LOAD = False
+AUDIO = False
+DO_COMPILE = False
 DEVICE = 'cuda'
 STEPS = 6
 device = "cuda"
@@ -32,8 +34,11 @@ torch.set_grad_enabled(False)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
+
+
+
 loaded = False
-if os.path.exists('dataframe.parquet'):
+if os.path.exists('dataframe.parquet') and DO_LOAD:
     prevs_df = pd.read_parquet('dataframe.parquet')
     prevs_df['user:rating'] = [ast.literal_eval(i) for i in prevs_df['user:rating']]
     loaded = True
@@ -60,7 +65,18 @@ import torchvision
 
 @spaces.GPU()
 def solver(embs, ys):
-    sol = torch.linalg.solve_ex(ys.to(device, dtype=dtype), embs.to(device, dtype=dtype))
+    ys = torch.tensor(ys).to('cuda', dtype=torch.float32).squeeze().unsqueeze(1)
+    ys = (ys - ys.mean())
+    if ys.abs().max() != 0:
+        ys = ys / ys.abs().max()
+
+    embs = torch.tensor(embs).to('cuda', dtype=torch.float32).squeeze()
+    #if embs.norm() != 0:
+    #    embs = embs / embs.norm()
+    
+    print('ys:', ys.shape, ys, 'embs:', embs.shape, embs)
+    sol = torch.linalg.lstsq(ys, embs).solution
+    print('sol', sol.shape, sol) # shape seems wrong
     return sol.to('cpu', dtype=torch.float32)
 
 
@@ -83,13 +99,14 @@ def write_video(audio_name, file_name, images, fps=17):
         for packet in oastream.encode(frame):
             container.mux(packet)
     
-    adstream = container.add_stream('aac')
-    audio_input = av.open(audio_name, 'r')
-    stream = audio_input.streams.audio[0]
-    for packet in audio_input.demux((stream,)):
-        for frame in packet.decode():
-            a_frames = adstream.encode(frame)
-            container.mux(a_frames)
+    if audio_name != None:
+        adstream = container.add_stream('aac')
+        audio_input = av.open(audio_name, 'r')
+        stream = audio_input.streams.audio[0]
+        for packet in audio_input.demux((stream,)):
+            for frame in packet.decode():
+                a_frames = adstream.encode(frame)
+                container.mux(a_frames)
     
     # Flush stream
     for packet in oastream.encode():
@@ -258,18 +275,10 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 os.environ['HF_TOKEN'] = "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"
 
-# Download model
-audio_model, model_config = get_pretrained_model("stabilityai/stable-audio-open-1.0", )
-sample_rate = model_config["sample_rate"]
-sample_size = model_config["sample_size"]
-
-audio_model = audio_model.to(device)
-
-if DO_COMPILE:
-    audio_model = torch.compile(audio_model)
 
 def get_audio(text):
-
+    if AUDIO:
+        return None
     # Set up text and timing conditioning
     conditioning = [{
         "prompt": text,
@@ -301,6 +310,22 @@ def get_audio(text):
     
     torchaudio.save(path, output, sample_rate)
     return path
+
+
+
+def none_fn(*args, **kwargs):
+    return None
+
+# Download model
+if AUDIO:
+    audio_model, model_config = get_pretrained_model("stabilityai/stable-audio-open-1.0", )
+    sample_rate = model_config["sample_rate"]
+    sample_size = model_config["sample_size"]
+    audio_model = audio_model.to(device)
+    if DO_COMPILE:
+        audio_model = torch.compile(audio_model)
+else:
+    get_audio = none_fn
 
 
 
@@ -349,16 +374,17 @@ def generate(in_im_embs, prompt='the scene'):
 def get_user_emb(embs, ys):
     # handle case where every instance of calibration videos is 'Neither' or 'Like' or 'Dislike'
     
-    if len(list(ys)) <= 10:
-        aways = [torch.zeros_like(embs[0]) for i in range(10)]
-        embs += aways
-        awal = [0 for i in range(5)] + [1 for i in range(5)]
-        ys += awal
+    # TODO: important?
+    #if len(list(ys)) <= 10:
+    #    aways = [torch.zeros_like(embs[0]) for i in range(10)]
+    #    embs += aways
+    #    awal = [0 for i in range(5)] + [1 for i in range(5)]
+    #    ys += awal
     
     indices = list(range(len(embs)))
     # sample only as many negatives as there are positives
-    pos_indices = [i for i in indices if ys[i] == 1]
-    neg_indices = [i for i in indices if ys[i] == 0]
+    pos_indices = [i for i in indices if ys[i] > 0]
+    neg_indices = [i for i in indices if ys[i] < 0]
     #lower = min(len(pos_indices), len(neg_indices))
     #neg_indices = random.sample(neg_indices, lower)
     #pos_indices = random.sample(pos_indices, lower)
@@ -372,16 +398,14 @@ def get_user_emb(embs, ys):
         ys.pop(-1)
     
     feature_embs = torch.stack([embs[i].squeeze().to('cpu') for i in indices]).to('cpu')
-    #scaler = preprocessing.StandardScaler().fit(feature_embs)
-    #feature_embs = scaler.transform(feature_embs)
+    scaler = preprocessing.StandardScaler().fit(feature_embs)
+    feature_embs = scaler.transform(feature_embs)
     chosen_y = np.array([ys[i] for i in indices])
     
-    if feature_embs.norm() != 0:
-        feature_embs = feature_embs / feature_embs.norm()
+    #if feature_embs.norm() != 0:
+    #    feature_embs = feature_embs / feature_embs.norm()
 
-    # TODO test with regression (esp standardize inputs)
-    uemb = solver(feature_embs.squeeze(), chosen_y)
-    print(uemb.shape)
+    uemb = solver(feature_embs, chosen_y)
     coef_ = torch.tensor(uemb, dtype=torch.float32).detach().to('cpu')
     coef_ = coef_ / coef_.abs().max()
 
@@ -396,7 +420,7 @@ def pluck_img(user_id, user_emb):
         not_rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, 'gone') == 'gone' for i in prevs_df.iterrows()]]
         time.sleep(.001)
     # TODO optimize this lol
-    best_sim = -100000
+    best_sim = -np.inf
     for i in not_rated_rows.iterrows():
         # TODO sloppy .to but it is 3am.
         sim = torch.cosine_similarity(torch.tensor(i[1]['embeddings']), user_emb.detach().to('cpu'))
@@ -449,11 +473,10 @@ def background_next_image():
             user_emb = get_user_emb(embs, ys) * 3
             
             
-            pos_mask = [i[uid] == 1 for i in rated_rows['user:rating'].to_list()]
-            neg_mask = [i[uid] == 0 for i in rated_rows['user:rating'].to_list()]
+            pos_mask = [i[uid] > 0 for i in rated_rows['user:rating'].to_list()]
+            neg_mask = [i[uid] < 0 for i in rated_rows['user:rating'].to_list()]
             paths_pos_from_user = rated_rows[pos_mask]['paths'].to_list()
             paths_neg_from_user= rated_rows[neg_mask]['paths'].to_list()
-            # TODO keep middle frame in row
             
             images = [paths_neg_from_user[random.randint(0, len(paths_neg_from_user)-1)]]
             for _ in range(N_IMG_EMBS):
@@ -490,7 +513,8 @@ def background_next_image():
                     prevs_df = pd.concat((prevs_df.iloc[:6], prevs_df.iloc[7:]))
                 prevs_df_tmp = prevs_df.copy()
                 prevs_df_tmp['user:rating'] = prevs_df_tmp['user:rating'].astype(str)
-                prevs_df_tmp.to_parquet('dataframe.parquet', engine='pyarrow', schema=pa.schema({"embeddings": pa.list_(pa.float64()), 
+                if DO_LOAD:
+                    prevs_df_tmp.to_parquet('dataframe.parquet', engine='pyarrow', schema=pa.schema({"embeddings": pa.list_(pa.float64()), 
                                                                                              'text': pa.string(),
                                                                                              'audio': pa.string(),
                                                                                              'paths': pa.string(),
@@ -530,14 +554,16 @@ def start(_, calibrate_prompts, user_id, request: gr.Request):
     user_id = int(str(time.time())[-7:].replace('.', ''))
     image, calibrate_prompts, text, audio = next_image(calibrate_prompts, user_id)
     return [
-            gr.Button(value='Like (L)', interactive=True), 
-            gr.Button(value='Neither (Space)', interactive=True, visible=False), 
-            gr.Button(value='Dislike (A)', interactive=True),
+            gr.Button(value='Hate', interactive=True), 
+            gr.Button(value='Dislike', interactive=True), 
+            gr.Button(value='Like', interactive=True),
+            gr.Button(value='Love', interactive=True),
+            gr.Button(value='Neither', interactive=False, visible=False),
             gr.Button(value='Start', interactive=False),
             image,
             calibrate_prompts,
             user_id,
-            None
+            audio
             ]
 
 
@@ -545,13 +571,17 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
     global prevs_df
     
     
-    if choice == 'Like (L)':
-        choice = 1
-    elif choice == 'Neither (Space)':
+    if choice == 'Like':
+        choice = .5
+    elif choice == 'Love':
+        choice = 1.
+    elif choice == 'Neither':
         img, calibrate_prompts, text, audio = next_image(calibrate_prompts, user_id)
         return img, calibrate_prompts, text, audio
+    elif choice == 'Dislike':
+        choice = -.5
     else:
-        choice = 0
+        choice = -1.
     
     # if we detected NSFW, leave that area of latent space regardless of how they rated chosen.
     # TODO skip allowing rating & just continue
@@ -567,7 +597,10 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
     img, calibrate_prompts, text, audio = next_image(calibrate_prompts, user_id)
     return img, calibrate_prompts, text, None
 
-css = '''.gradio-container{max-width: 700px !important}
+
+#.gradio-container{max-width: 700px !important}
+css = '''
+.gradio-container{max-width: 900px !important}
 #description{text-align: center}
 #description h1, #description h3{display: block}
 #description p{margin-top: 0}
@@ -581,20 +614,26 @@ css = '''.gradio-container{max-width: 700px !important}
     }
 }
 '''
+
+
+# For hotkeys
+#document.addEventListener('keydown', function(event) {
+#    if (event.key === 'a' || event.key === 'A') {
+#        // Trigger click on 'dislike' if 'A' is pressed
+#        document.getElementById('dislike').click();
+#    } else if (event.key === ' ' || event.keyCode === 32) {
+#        // Trigger click on 'neither' if Spacebar is pressed
+#        document.getElementById('neither').click();
+#    } else if (event.key === 'l' || event.key === 'L') {
+#        // Trigger click on 'like' if 'L' is pressed
+#        document.getElementById('like').click();
+#    }
+#});
+
+
+
 js_head = '''
 <script>
-document.addEventListener('keydown', function(event) {
-    if (event.key === 'a' || event.key === 'A') {
-        // Trigger click on 'dislike' if 'A' is pressed
-        document.getElementById('dislike').click();
-    } else if (event.key === ' ' || event.keyCode === 32) {
-        // Trigger click on 'neither' if Spacebar is pressed
-        document.getElementById('neither').click();
-    } else if (event.key === 'l' || event.key === 'L') {
-        // Trigger click on 'like' if 'L' is pressed
-        document.getElementById('like').click();
-    }
-});
 function fadeInOut(button, color) {
   button.style.setProperty('--bg-color', color);
   button.classList.remove('fade-in-out');
@@ -611,6 +650,10 @@ document.body.addEventListener('click', function(event) {
       fadeInOut(target, '#0099ff');
     } else if (target.id === 'like') {
       fadeInOut(target, '#0099ff');
+    } else if (target.id === 'hate') {
+      fadeInOut(target, '#2a39a3');
+    } else if (target.id === 'love') {
+      fadeInOut(target, '#2a39a3');
     } else if (target.id === 'neither') {
       fadeInOut(target, '#cccccc');
     }
@@ -623,7 +666,7 @@ with gr.Blocks(css=css, head=js_head, theme=gr.themes.Soft()) as demo:
     gr.Markdown('''# Blue Tigers
 ### Generative Recommenders for Exporation of Video
 
-Explore the latent space without text prompts based on your preferences. Learn more on [the write-up](https://rynmurdock.github.io/posts/2024/3/generative_recomenders/).
+Explore the latent space without text prompting based on your preferences. Learn more on [the write-up](https://rynmurdock.github.io/posts/2024/3/generative_recomenders/).
     ''', elem_id="description")
     user_id = gr.State()
     # calibration videos -- this is a misnomer now :D
@@ -652,33 +695,51 @@ Explore the latent space without text prompts based on your preferences. Learn m
        )
         img.play(l, js='''document.querySelector('[data-testid="Lightning-player"]').loop = true''')
     with gr.Row():
+        b5 = gr.Button(value='Neither', interactive=False, elem_id="neither", visible=False)
         audio = gr.Audio(interactive=False, visible=False, label='Audio', autoplay=False)
         audio.play(l, js='''document.querySelector("#waveform > div").shadowRoot.querySelector("audio").loop = true''',)
         text = gr.Textbox(interactive=False, visible=False, label='Text')
-    with gr.Row(equal_height=True):
-        b3 = gr.Button(value='Dislike (A)', interactive=False, elem_id="dislike")
-        b2 = gr.Button(value='Neither (Space)', interactive=False, elem_id="neither", visible=False)
-        b1 = gr.Button(value='Like (L)', interactive=False, elem_id="like")
-        b1.click(
-        choose, 
-        [img, b1, calibrate_prompts, user_id],
-        [img, calibrate_prompts, text, audio],
-        )
-        b2.click(
-        choose, 
-        [img, b2, calibrate_prompts, user_id],
-        [img, calibrate_prompts, text, audio],
-        )
-        b3.click(
-        choose, 
-        [img, b3, calibrate_prompts, user_id],
-        [img, calibrate_prompts, text, audio],
-        )
+    with gr.Row(elem_id='button_row'):
+            b1 = gr.Button(value='Hate', interactive=False, elem_id="hate", size='sm')
+            
+            b2 = gr.Button(value='Dislike', interactive=False, elem_id="dislike", size='sm')
+            
+            b3 = gr.Button(value='Like', interactive=False, elem_id="like", size='sm',)
+            
+            b4 = gr.Button(value='Love', interactive=False, elem_id="love", size='sm')
+            
+            b1.click(
+            choose, 
+            [img, b1, calibrate_prompts, user_id],
+            [img, calibrate_prompts, text, audio],
+            )
+            
+            b3.click(
+            choose, 
+            [img, b3, calibrate_prompts, user_id],
+            [img, calibrate_prompts, text, audio],
+            )
+            b4.click(
+            choose, 
+            [img, b4, calibrate_prompts, user_id],
+            [img, calibrate_prompts, text, audio],
+            )
+            b5.click(
+            choose, 
+            [img, b5, calibrate_prompts, user_id],
+            [img, calibrate_prompts, text, audio],
+            )
+            
+            b2.click(
+            choose, 
+            [img, b2, calibrate_prompts, user_id],
+            [img, calibrate_prompts, text, audio],
+            )
     with gr.Row():
-        b4 = gr.Button(value='Start')
-        b4.click(start,
-                 [b4, calibrate_prompts, user_id],
-                 [b1, b2, b3, b4, img, calibrate_prompts, user_id, audio]
+        b6 = gr.Button(value='Start')
+        b6.click(start,
+                 [b6, calibrate_prompts, user_id],
+                 [b1, b2, b3, b4, b5, b6, img, calibrate_prompts, user_id, audio]
                  )
     with gr.Row():
         html = gr.HTML('''<div style='text-align:center; font-size:20px'>You will calibrate for several videos and then roam. </ div><br><br><br>
@@ -708,10 +769,10 @@ if not loaded:
         './fourth.mp4',
         './fifth.mp4',
         './sixth.mp4',
-        './seventh.mp4',
-        './eigth.mp4',
-        './ninth.mp4',
-        './tenth.mp4',
+        #'./seventh.mp4',
+        #'./eigth.mp4',
+        #'./ninth.mp4',
+        #'./tenth.mp4',
         ]:
         tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'user:rating', 'latest_user_to_rate', 'from_user_id', 'text', 'audio'])
         tmp_df['paths'] = [im]
