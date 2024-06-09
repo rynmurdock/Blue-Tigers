@@ -43,6 +43,7 @@ def censored_lstsq(A, B, M):
 
 
 def alternating_l_sq(interactions, clip_item_embs, mask, match_images, epochs=4):
+    # TODO see diff on item_embs
     user_embs = torch.randn(interactions.shape[0], 1280, dtype=torch.bfloat16, device=DEVICE)
     item_embs = clip_item_embs.clone()
     
