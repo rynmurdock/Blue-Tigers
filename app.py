@@ -452,8 +452,8 @@ def background_next_image():
         if len(rated_rows) < 5:
             return
 
-        # sort descending? pd unique and from latest row up.
-        user_id_list = set(rated_rows['latest_user_to_rate'].to_list())
+        # sort chronological pd unique and from latest row up.
+        user_id_list = pd.unique(rated_rows['latest_user_to_rate'])[::-1]
         for uid in user_id_list:
             # as in rated by them
             rated_rows = prevs_df[[i[1]['user:rating'].get(uid, None) is not None for i in prevs_df.iterrows()]]

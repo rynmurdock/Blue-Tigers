@@ -76,9 +76,9 @@ def all_embeddings(df, uid):
     
     # could shard for user's history & update?
     # initialize all user & item embeddings with kept old for faster convergence?
-    clip_item_embs = torch.tensor(df['embeddings'].to_list()).to(DEVICE).to(torch.float32)
     
     rated_rows_all = df[[i[1]['user:rating'] != {0: 0} for i in df.iterrows()]]
+    clip_item_embs = torch.tensor(rated_rows_all['embeddings'].to_list()).to(DEVICE).to(torch.float32)
     
     users = []
     for i in rated_rows_all.iterrows():
@@ -102,10 +102,7 @@ def all_embeddings(df, uid):
     
     # use weighting?
     user_embs = alternating_l_sq(interactions_matrix, clip_item_embs, mask, match_images)
-    user_emb = user_embs[[uid == u for u in users]]    
-    
-
-    return user_emb.to('cuda', dtype=torch.bfloat16) # easy to pluck
+    return user_embs.to('cuda', dtype=torch.bfloat16) # easy to pluck
 
 
 
@@ -113,15 +110,12 @@ def all_embeddings(df, uid):
 
 def uid_embeddings(df, uid):
     # calculate user embeddings; should return the whole thing & run every x ratings, but will do one user for now.
-    
-    # could shard for user's history & update?
+
     # initialize all user & item embeddings with kept old for faster convergence?
     
     rated_rows_all = df[[i[1]['user:rating'] != {0: 0} for i in df.iterrows()]]
     rated_from_user = rated_rows_all[[i[1]['user:rating'].get(uid, 'gone') != 'gone' for i in rated_rows_all.iterrows()]].reset_index()
     clip_item_embs = torch.tensor(rated_from_user['embeddings'].to_list()).to(DEVICE).to(torch.float32)
-    
-    print(rated_from_user)
     
     users = []
     for i in rated_from_user.iterrows():
@@ -145,7 +139,7 @@ def uid_embeddings(df, uid):
     
     # use weighting?
     user_embs = alternating_l_sq(interactions_matrix, clip_item_embs, mask, match_images)
-    user_emb = user_embs[[uid == u for u in users]]    
+    user_emb = user_embs[[uid == u for u in users]]
     
 
     return user_emb.to('cuda', dtype=torch.bfloat16) # easy to pluck
