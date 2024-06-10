@@ -209,6 +209,7 @@ def generate(in_im_embs, prompt='the scene'):
 
 @spaces.GPU()
 def solver(embs, ys):
+    print('ys:', ys,'EMBS:', embs.shape, embs)
     ys = torch.tensor(ys).to('cpu', dtype=torch.float32).squeeze().unsqueeze(1)
     
 #     if ys.abs().max() != 0:
@@ -218,9 +219,8 @@ def solver(embs, ys):
     #if embs.norm() != 0:
     #    embs = embs / embs.norm()
     
-    print('ys:', ys.shape, ys, 'EMBS:', embs.shape, embs)
+
     sol = torch.linalg.lstsq(ys, embs).solution
-    print('sol', sol.shape, sol) # shape seems wrong
     return sol.to('cpu', dtype=torch.float32)
 
 
@@ -412,8 +412,10 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
         choice = [0, 0]
     elif choice == 'Dislike Content Like Style':
         choice = [0, 1]
-    elif choice == 'Like Content Disike Style':
+    elif choice == 'Like Content Dislike Style':
         choice = [1, 0]
+    else:
+        assert False, f'choice is {choice}'
     
     # if we detected NSFW, leave that area of latent space regardless of how they rated chosen.
     # TODO skip allowing rating & just continue
@@ -615,4 +617,4 @@ for im, txt in [ # TODO more movement
 
 demo.launch(share=True, server_port=8443)
 
-
+Neither
