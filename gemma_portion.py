@@ -1,7 +1,8 @@
 
 
-import matplotlib.pyplot as plt
 
+PLUCK_LAYER = 13
+# modded by advadnoun
 # coding=utf-8
 # Copyright 2024 Google Inc. HuggingFace Inc. team. All rights reserved.
 #
@@ -18,8 +19,6 @@ import matplotlib.pyplot as plt
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """PyTorch Gemma model."""
-
-# modified by advadnoun
 
 import math
 from typing import List, Optional, Tuple, Union
@@ -102,16 +101,16 @@ class GemmaDecoderLayer(nn.Module):
             cache_position=cache_position,
         )
         hidden_states = residual + hidden_states
-        if layern == gemm.pluck_layer:
-          hidden_states = hidden_states + probe_direction
-          new_activations = hidden_states
+        if layern == PLUCK_LAYER:
+            hidden_states = hidden_states + probe_direction
+            new_activations = hidden_states
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
-
+        
         outputs = (hidden_states,)
 
         if output_attentions:
@@ -120,7 +119,7 @@ class GemmaDecoderLayer(nn.Module):
         if use_cache:
             outputs += (present_key_value,)
 
-        if layern == gemm.pluck_layer:
+        if layern == PLUCK_LAYER:
           return {'hidden_states': outputs, 'new_activations': new_activations}
         else:
           return outputs
@@ -1016,64 +1015,11 @@ def _sample(
         this_peer_finished = unfinished_sequences.max() == 0
 
     return input_ids, new_activations
-    
-    
-from sklearn.svm import SVC
-from sklearn import preprocessing
-import numpy as np
-
-from transformers import AutoTokenizer, AutoModelForCausalLM
-import torch
-
-tokenizer = AutoTokenizer.from_pretrained("google/gemma-2b", token='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')
-gemm = GemmaForCausalLM.from_pretrained("google/gemma-2b", device_map="auto", torch_dtype=torch.bfloat16, token='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')
 
 
-dtype=torch.bfloat16
-torch.set_float32_matmul_precision('high')
-
-EMB_LEN = 2048
-gemm.pluck_layer = 4
-
-final_act = 0
-
-from types import MethodType
-gemm.generate = MethodType(generate, gemm)
-gemm._sample = MethodType(_sample, gemm)
-
-def get_gemb(ys, embs):
-    if len(list(set(ys))) <= 1:
-        embs.append(.01*torch.randn(1, EMB_LEN))
-        embs.append(.01*torch.randn(1, EMB_LEN))
-        ys.append(0)
-        ys.append(1)
 
 
-    pos_indices = [i for i in range(len(embs)) if ys[i] == 1]
-    neg_indices = [i for i in range(len(embs)) if ys[i] == 0]
-    indices = pos_indices + neg_indices
 
-    feature_embs = torch.stack([embs[i].to('cpu').to(torch.float32).squeeze() for i in indices]).to('cpu')
-    scaler = preprocessing.StandardScaler().fit(feature_embs)
-    feature_embs = scaler.transform(feature_embs)
 
-    feature_embs = np.array(feature_embs)
-    chosen_y = np.array([ys[i] for i in indices])
 
-    lin_class = SVC(max_iter=50000, kernel='linear', class_weight='balanced', C=.1).fit(feature_embs, chosen_y)
-    coef_ = torch.tensor(lin_class.coef_)
-    coef_ = coef_ / coef_.abs().max() * 1.7
-
-    im_emb = coef_.to(dtype=dtype)
-    return im_emb.to(torch.float32)
-
-def generate_gemm(prompt='a description of the scene:', in_embs=torch.zeros(1, 1, 2048),):
-  global final_act
-  prompt = tokenizer(prompt, return_tensors="pt").to("cuda").input_ids
-  final_act = in_embs.squeeze()[None, None, :].to(device='cuda', dtype=dtype)
-  text, in_embs = gemm.generate(prompt, 
-                                 probe_direction=in_embs.squeeze()[None, None, :].to(device='cuda', dtype=dtype),
-                                 do_sample=True, top_p=.97, temperature=1.2, max_new_tokens=20)
-  text = tokenizer.decode(text[0])
-  return text, torch.cat(in_embs[1:], 1).mean(1).to('cpu').to(torch.float32)
 

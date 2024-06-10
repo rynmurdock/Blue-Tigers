@@ -11,6 +11,13 @@ output_hidden_state = False
 device = "cuda"
 dtype = torch.bfloat16
 
+# gemma
+EMB_LEN = 3072
+
+
+
+import spaces
+
 import matplotlib.pyplot as plt
 import matplotlib
 import logging
@@ -26,8 +33,6 @@ import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
 import sched
 import threading
-
-from gemma_portion import generate_gemm, get_gemb
 
 import random
 import time
@@ -101,12 +106,15 @@ text_encoder = CLIPTextModel.from_pretrained('rynmurdock/Sea_Claws', subfolder='
 device_map='cpu').to(dtype)
 
 adapter = MotionAdapter.from_pretrained("wangfuyun/AnimateLCM")
-pipe = AnimateDiffPipeline.from_pretrained("runwayml/stable-diffusion-v1-5", motion_adapter=adapter, image_encoder=image_encoder, torch_dtype=dtype,     
-                                            unet=unet, text_encoder=text_encoder)
+pipe = AnimateDiffPipeline.from_pretrained("runwayml/stable-diffusion-v1-5", motion_adapter=adapter, image_encoder=image_encoder, 
+                                            torch_dtype=dtype,     
+                                            unet=unet, text_encoder=text_encoder,)
 pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config, beta_schedule="linear")
 pipe.load_lora_weights("wangfuyun/AnimateLCM", weight_name="AnimateLCM_sd15_t2v_lora.safetensors", adapter_name="lcm-lora",)
 pipe.set_adapters(["lcm-lora"], [.9])
 pipe.fuse_lora()
+pipe.enable_attention_slicing()
+pipe.enable_vae_slicing()
 
 
 #pipe = AnimateDiffPipeline.from_pretrained('emilianJR/epiCRealism', torch_dtype=dtype, image_encoder=image_encoder)
@@ -114,10 +122,12 @@ pipe.fuse_lora()
 #repo = "ByteDance/AnimateDiff-Lightning"
 #ckpt = f"animatediff_lightning_4step_diffusers.safetensors"
 
+target_blocks = {"up": {"block_1": [1.0]}}
+pipe.set_ip_adapter_scale(target_blocks)
 
 pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15_vit-G.bin", map_location='cpu')
 # This IP adapter improves outputs substantially.
-pipe.set_ip_adapter_scale(.8)
+pipe.set_ip_adapter_scale(.4)#.8
 pipe.unet.fuse_qkv_projections()
 #pipe.enable_free_init(method="gaussian", use_fast_sampling=True)
 
@@ -126,8 +136,36 @@ pipe.to(device=DEVICE)
 #pipe.vae = torch.compile(pipe.vae)
 
 
+from types import MethodType
 
+from transformers import AutoTokenizer
 
+import gemma_portion
+
+tokenizer = AutoTokenizer.from_pretrained("google/gemma-7b-it",)
+gem_model = gemma_portion.GemmaForCausalLM.from_pretrained("google/gemma-7b-it", 
+                                                                device_map="auto", 
+                                                                torch_dtype=torch.bfloat16, load_in_4bit=True)
+gem_model._sample = MethodType(gemma_portion._sample, gem_model)
+gem_model.generate = MethodType(gemma_portion.generate, gem_model)
+
+# SEE GEMMA_PORTION FOR PLUCK_LAYER
+
+@spaces.GPU()
+def generate_gemm(prompt='an image of a', in_embs=torch.zeros(1, 1, EMB_LEN),):
+  prompt = tokenizer(prompt, return_tensors="pt").to("cuda").input_ids
+  in_embs = in_embs / in_embs.abs().max() * 2
+  text, in_embs = gem_model.generate(prompt, probe_direction=in_embs.squeeze()[None, None, :].to(device='cuda', dtype=dtype), do_sample=True, top_p=.8, max_new_tokens=10)
+  text = tokenizer.decode(text[0], skip_special_tokens=True)
+  print('\n\n\n', text, '\n\n\n')
+  return text, torch.cat(in_embs[1:], 1).mean(1).to('cpu').to(torch.float32)
+
+@spaces.GPU()
+def cal_generate(prompt, in_embs=torch.zeros(1, 1, EMB_LEN),):
+  prompt = tokenizer(prompt, return_tensors="pt").to("cuda").input_ids
+  text, in_embs = gem_model.generate(prompt, probe_direction=in_embs.squeeze()[None, None, :].to(device='cuda', dtype=dtype), max_new_tokens=10)
+  text = tokenizer.decode(text[0][len(prompt):], skip_special_tokens=True)
+  return text, torch.cat(in_embs[1:], 1).mean(1).to('cpu').to(torch.float32)
 
 
 @spaces.GPU()
@@ -164,13 +202,32 @@ def generate(in_im_embs, prompt='the scene'):
 
 #######################
 
+
+
+
+
+
+@spaces.GPU()
+def solver(embs, ys):
+    ys = torch.tensor(ys).to('cpu', dtype=torch.float32).squeeze().unsqueeze(1)
+    
+#     if ys.abs().max() != 0:
+#         ys = ys / ys.abs().max()
+    ys = (ys - .5) * 2
+
+    #if embs.norm() != 0:
+    #    embs = embs / embs.norm()
+    
+    print('ys:', ys.shape, ys, 'EMBS:', embs.shape, embs)
+    sol = torch.linalg.lstsq(ys, embs).solution
+    print('sol', sol.shape, sol) # shape seems wrong
+    return sol.to('cpu', dtype=torch.float32)
+
+
+
+
 def get_user_emb(embs, ys):
     # handle case where every instance of calibration videos is 'Neither' or 'Like' or 'Dislike'
-    if len(list(ys)) <= 7:
-        aways = [.01*torch.randn(1280) for i in range(3)]
-        embs += aways
-        awal = [0 for i in range(3)]
-        ys += awal
     
     indices = list(range(len(embs)))
     # sample only as many negatives as there are positives
@@ -193,12 +250,13 @@ def get_user_emb(embs, ys):
     #feature_embs = scaler.transform(feature_embs)
     chosen_y = np.array([ys[i] for i in indices])
     
-    if feature_embs.norm() != 0:
-        feature_embs = feature_embs / feature_embs.norm()
+    #if feature_embs.norm() != 0:
+    #    feature_embs = feature_embs / feature_embs.norm()
     
     #lin_class = Ridge(fit_intercept=False).fit(feature_embs, chosen_y)
-    lin_class = SVC(max_iter=20, kernel='linear', C=.1, class_weight='balanced').fit(feature_embs, chosen_y)
-    coef_ = torch.tensor(lin_class.coef_, dtype=torch.float32).detach().to('cpu')
+    #lin_class = SVC(max_iter=20, kernel='linear', C=.1, class_weight='balanced').fit(feature_embs, chosen_y)
+    #coef_ = torch.tensor(lin_class.coef_, dtype=torch.float32).detach().to('cpu')
+    coef_ = solver(feature_embs, ys)
     coef_ = coef_ / coef_.abs().max() * 3
 
     w = 1# if len(embs) % 2 == 0 else 0
@@ -210,7 +268,7 @@ def pluck_img(user_id, user_emb):
     not_rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, 'gone') == 'gone' for i in prevs_df.iterrows()]]
     while len(not_rated_rows) == 0:
         not_rated_rows = prevs_df[[i[1]['user:rating'].get(user_id, 'gone') == 'gone' for i in prevs_df.iterrows()]]
-        time.sleep(.001)
+        time.sleep(.1)
     # TODO optimize this lol
     best_sim = -100000
     for i in not_rated_rows.iterrows():
@@ -229,10 +287,10 @@ def background_next_image():
         # only let it get N (maybe 3) ahead of the user
         #not_rated_rows = prevs_df[[i[1]['user:rating'] == {' ': ' '} for i in prevs_df.iterrows()]]
         rated_rows = prevs_df[[i[1]['user:rating'] != {' ': ' '} for i in prevs_df.iterrows()]]
-        while len(rated_rows) < 4:
+        if len(rated_rows) < 4:
+            time.sleep(.1)
         #    not_rated_rows = prevs_df[[i[1]['user:rating'] == {' ': ' '} for i in prevs_df.iterrows()]]
-            rated_rows = prevs_df[[i[1]['user:rating'] != {' ': ' '} for i in prevs_df.iterrows()]]
-            time.sleep(.01)
+            return
 
         user_id_list = set(rated_rows['latest_user_to_rate'].to_list())
         for uid in user_id_list:
@@ -258,15 +316,14 @@ def background_next_image():
             
             embs, ys, gembs = pluck_embs_ys(uid)
             
-            user_emb = get_user_emb(embs, ys)
+            user_emb = get_user_emb(embs, [y[1] for y in ys])
             
-            gems = [g for g in gembs if isinstance(g, torch.Tensor)]
-            # need a way to get text in; could label videos. TODO TODO TODO
-            if len(gems) > 4:
-                new_gem = get_gemb(ys, gems)
-                text, gembs = generate_gemm(in_embs=new_gem)
+            if len(gembs) > 4:
+                new_gem = get_user_emb(gembs, [y[0] for y in ys])
+                text, _ = generate_gemm(in_embs=new_gem)
+                _, gembs = cal_generate(prompt=text)
             else:
-                text, gembs = generate_gemm(in_embs=torch.zeros(1, 2048))
+                text, gembs = generate_gemm(in_embs=torch.zeros(1, EMB_LEN))
             img, embs = generate(user_emb, text)
             
             if img:
@@ -309,11 +366,12 @@ def next_image(calibrate_prompts, user_id):
         if len(calibrate_prompts) > 0:
             cal_video = calibrate_prompts.pop(0)
             image = prevs_df[prevs_df['paths'] == cal_video]['paths'].to_list()[0]
-            
-            return image, calibrate_prompts, ''
+            text = prevs_df[prevs_df['paths'] == cal_video]['text'].to_list()[0]
+            return image, calibrate_prompts, text
         else:
             embs, ys, gembs = pluck_embs_ys(user_id)
-            user_emb = get_user_emb(embs, ys)
+            ys_here = [y[1] for y in ys]
+            user_emb = get_user_emb(embs, ys_here)
             image, text = pluck_img(user_id, user_emb)
             return image, calibrate_prompts, text
 
@@ -329,10 +387,12 @@ def start(_, calibrate_prompts, user_id, request: gr.Request):
     user_id = int(str(time.time())[-7:].replace('.', ''))
     image, calibrate_prompts, text = next_image(calibrate_prompts, user_id)
     return [
-            gr.Button(value='Like (L)', interactive=True), 
+            gr.Button(value='Like', interactive=True), 
             gr.Button(value='Neither (Space)', interactive=True, visible=False), 
-            gr.Button(value='Dislike (A)', interactive=True),
+            gr.Button(value='Dislike', interactive=True),
             gr.Button(value='Start', interactive=False),
+            gr.Button(value='Like Content Dislike Style', interactive=True),
+            gr.Button(value='Dislike Content Like Style', interactive=True),
             image,
             calibrate_prompts,
             user_id
@@ -343,19 +403,23 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
     global prevs_df
     
     
-    if choice == 'Like (L)':
-        choice = 1
+    if choice == 'Like':
+        choice = [1, 1]
     elif choice == 'Neither (Space)':
         img, calibrate_prompts, text = next_image(calibrate_prompts, user_id)
-        return img, calibrate_prompts
-    else:
-        choice = 0
+        return img, calibrate_prompts, text
+    elif choice == 'Dislike':
+        choice = [0, 0]
+    elif choice == 'Dislike Content Like Style':
+        choice = [0, 1]
+    elif choice == 'Like Content Disike Style':
+        choice = [1, 0]
     
     # if we detected NSFW, leave that area of latent space regardless of how they rated chosen.
     # TODO skip allowing rating & just continue
     if img == None:
         print('NSFW -- choice is disliked')
-        choice = 0
+        choice = [0, 0]
     
     row_mask = [p.split('/')[-1] in img for p in prevs_df['paths'].to_list()]
     # if it's still in the dataframe, add the choice
@@ -450,9 +514,19 @@ Explore the latent space without text prompts based on your preferences. Learn m
        )
         img.play(l, js='''document.querySelector('[data-testid="Lightning-player"]').loop = true''')
     with gr.Row(equal_height=True):
-        b3 = gr.Button(value='Dislike (A)', interactive=False, elem_id="dislike")
+        b3 = gr.Button(value='Dislike', interactive=False, elem_id="dislike")
+
         b2 = gr.Button(value='Neither (Space)', interactive=False, elem_id="neither", visible=False)
-        b1 = gr.Button(value='Like (L)', interactive=False, elem_id="like")
+
+        b1 = gr.Button(value='Like', interactive=False, elem_id="like")
+    with gr.Row(equal_height=True):
+        b6 = gr.Button(value='Dislike Content Like Style', interactive=False, elem_id="dislike like")
+        
+        b5 = gr.Button(value='Like Content Dislike Style', interactive=False, elem_id="like dislike")
+        
+        
+        
+        
         b1.click(
         choose, 
         [img, b1, calibrate_prompts, user_id],
@@ -468,11 +542,21 @@ Explore the latent space without text prompts based on your preferences. Learn m
         [img, b3, calibrate_prompts, user_id],
         [img, calibrate_prompts, text],
         )
+        b5.click(
+        choose, 
+        [img, b5, calibrate_prompts, user_id],
+        [img, calibrate_prompts, text],
+        )
+        b6.click(
+        choose, 
+        [img, b6, calibrate_prompts, user_id],
+        [img, calibrate_prompts, text],
+        )
     with gr.Row():
         b4 = gr.Button(value='Start')
         b4.click(start,
                  [b4, calibrate_prompts, user_id],
-                 [b1, b2, b3, b4, img, calibrate_prompts, user_id]
+                 [b1, b2, b3, b4, b5, b6, img, calibrate_prompts, user_id]
                  )
     with gr.Row():
         html = gr.HTML('''<div style='text-align:center; font-size:20px'>You will calibrate for several videos and then roam. </ div><br><br><br>
@@ -483,11 +567,9 @@ Explore the latent space without text prompts based on your preferences. Learn m
 </ div>''')
 
 # TODO quiet logging
-log = logging.getLogger('log_here')
-log.setLevel(logging.ERROR)
 
 scheduler = BackgroundScheduler()
-scheduler.add_job(func=background_next_image, trigger="interval", seconds=.1)
+scheduler.add_job(func=background_next_image, trigger="interval", seconds=.2)
 scheduler.start()
 
 #thread = threading.Thread(target=background_next_image,)
@@ -502,26 +584,32 @@ def encode_space(x):
     return im_emb.detach().to('cpu').to(torch.float32)
 
 # prep our calibration videos
-for im in [
-    './first.mp4',
-    './second.mp4',
-    './third.mp4',
-    './fourth.mp4',
-    './fifth.mp4',
-    './sixth.mp4',
-    './seventh.mp4',
-    './eigth.mp4',
-    './ninth.mp4',
-    './tenth.mp4',
+for im, txt in [ # TODO more movement
+    ('./first.mp4', 'an image of a painted still life'),
+    ('./second.mp4', 'an image of surrealist landscape with solid red circle'),
+    ('./third.mp4', 'an image of abstract art'),
+    ('./fourth.mp4', 'an image of a painted landscape on fire'),
+    ('./fifth.mp4', 'an image of image of a bizarre plant growing from a glass vase'),
+    ('./sixth.mp4', 'an image of dark fractals'),
+    ('./seventh.mp4', 'an image of a dark object'),
+    ('./eigth.mp4', 'an image: an object; small tree made of green & black wood'),
+    ('./ninth.mp4', 'an image of gorgeous flowing art; a sunflower'),
+    ('./tenth.mp4', 'an image of a fluffy creature turns towards you'),
     ]:
     tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'text', 'gemb'])
     tmp_df['paths'] = [im]
     image = list(imageio.imiter(im))
     image = image[len(image)//2]
     im_emb = encode_space(image)
+    
+    _, gemb = cal_generate(prompt=txt)
 
     tmp_df['embeddings'] = [im_emb.detach().to('cpu')]
     tmp_df['user:rating'] = [{' ': ' '}]
+    tmp_df['gemb'] = [gemb.detach().to('cpu')]
+    tmp_df['text'] = [txt]
+
+    
     prevs_df = pd.concat((prevs_df, tmp_df))
 
 
