@@ -59,7 +59,7 @@ from transformers import CLIPVisionModelWithProjection
 import uuid
 import av
 
-def write_video(file_name, images, fps=17):
+def write_video(file_name, images, fps=16):
     container = av.open(file_name, mode="w")
 
     stream = container.add_stream("h264", rate=fps)
@@ -125,8 +125,9 @@ pipe.enable_vae_slicing()
 
 pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15_vit-G.bin", map_location='cpu')
 # This IP adapter improves outputs substantially.
-target_blocks = {"up": {"block_1": [1.0]}}
-pipe.set_ip_adapter_scale(target_blocks)
+target_blocks = {"up": {"block_1": [0, 1.0, 0]}}
+
+#pipe.set_ip_adapter_scale(.8)
 
 
 
@@ -154,9 +155,9 @@ gem_model.generate = MethodType(gemma_portion.generate, gem_model)
 # SEE GEMMA_PORTION FOR PLUCK_LAYER
 
 @spaces.GPU()
-def generate_gemm(prompt='the', in_embs=torch.zeros(1, 1, EMB_LEN),):
+def generate_gemm(prompt='A', in_embs=torch.zeros(1, 1, EMB_LEN),):
   prompt = tokenizer(prompt, return_tensors="pt").to("cuda").input_ids
-  in_embs = in_embs / in_embs.abs().max() * 2.4
+  in_embs = in_embs / in_embs.abs().max() * 2.1
   text, in_embs = gem_model.generate(prompt, probe_direction=in_embs.squeeze()[None, None, :].to(device='cuda', dtype=dtype), do_sample=True, top_p=.8, max_new_tokens=10)
   text = tokenizer.decode(text[0], skip_special_tokens=True)
   print('\n\n\n', text, '\n\n\n')
@@ -230,14 +231,21 @@ def solver(embs, ys):
 
 def get_user_emb(embs, ys):
     # handle case where every instance of calibration videos is 'Neither' or 'Like' or 'Dislike'
+    if len(set(list(ys))) < 1:
+        embs = [i for i in embs]
+        aways = [torch.rand_like(embs[0]) - .5 for i in range(10)]
+        embs += aways
+        awal = [0 for i in range(5)] + [1 for i in range(5)]
+        ys += awal
     
     indices = list(range(len(embs)))
     # sample only as many negatives as there are positives
     pos_indices = [i for i in indices if ys[i] == 1]
     neg_indices = [i for i in indices if ys[i] == 0]
-    #lower = min(len(pos_indices), len(neg_indices))
-    #neg_indices = random.sample(neg_indices, lower)
-    #pos_indices = random.sample(pos_indices, lower)
+    lower = min(len(pos_indices), len(neg_indices))
+    neg_indices = random.sample(neg_indices, lower)
+    pos_indices = random.sample(pos_indices, lower)
+    indices = pos_indices + neg_indices
     
     
     # we may have just encountered a rare multi-threading diffusers issue (https://github.com/huggingface/diffusers/issues/5749);
@@ -258,8 +266,7 @@ def get_user_emb(embs, ys):
     #lin_class = Ridge(fit_intercept=False).fit(feature_embs, chosen_y)
     #lin_class = SVC(max_iter=20, kernel='linear', C=.1, class_weight='balanced').fit(feature_embs, chosen_y)
     #coef_ = torch.tensor(lin_class.coef_, dtype=torch.float32).detach().to('cpu')
-    coef_ = solver(feature_embs, ys)
-    coef_ = coef_ / coef_.abs().max() * 3
+    coef_ = solver(feature_embs, chosen_y)
 
     w = 1# if len(embs) % 2 == 0 else 0
     im_emb = w * coef_.to(dtype=dtype)
@@ -389,12 +396,12 @@ def start(_, calibrate_prompts, user_id, request: gr.Request):
     user_id = int(str(time.time())[-7:].replace('.', ''))
     image, calibrate_prompts, text = next_image(calibrate_prompts, user_id)
     return [
-            gr.Button(value='Like', interactive=True), 
+            gr.Button(value='👍', interactive=True), 
             gr.Button(value='Neither (Space)', interactive=True, visible=False), 
-            gr.Button(value='Dislike', interactive=True),
+            gr.Button(value='👎', interactive=True),
             gr.Button(value='Start', interactive=False),
-            gr.Button(value='Only Like Content', interactive=True),
-            gr.Button(value='Only Like Style', interactive=True),
+            gr.Button(value='👍 Content', interactive=True),
+            gr.Button(value='👍 Style', interactive=True),
             image,
             calibrate_prompts,
             user_id
@@ -405,16 +412,16 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
     global prevs_df
     
     
-    if choice == 'Like':
+    if choice == '👍':
         choice = [1, 1]
     elif choice == 'Neither (Space)':
         img, calibrate_prompts, text = next_image(calibrate_prompts, user_id)
         return img, calibrate_prompts, text
-    elif choice == 'Dislike':
+    elif choice == '👎':
         choice = [0, 0]
-    elif choice == 'Only Like Style':
+    elif choice == '👍 Style':
         choice = [0, 1]
-    elif choice == 'Only Like Content':
+    elif choice == '👍 Content':
         choice = [1, 0]
     else:
         assert False, f'choice is {choice}'
@@ -519,15 +526,15 @@ Explore the latent space without text prompts based on your preferences. Learn m
     
     
     with gr.Row(equal_height=True):
-        b3 = gr.Button(value='Dislike', interactive=False, elem_id="dislike")
+        b3 = gr.Button(value='👎', interactive=False, elem_id="dislike")
 
         b2 = gr.Button(value='Neither (Space)', interactive=False, elem_id="neither", visible=False)
 
-        b1 = gr.Button(value='Like', interactive=False, elem_id="like")
+        b1 = gr.Button(value='👍', interactive=False, elem_id="like")
     with gr.Row(equal_height=True):
-        b6 = gr.Button(value='Only Like Style', interactive=False, elem_id="dislike like")
+        b6 = gr.Button(value='👍 Style', interactive=False, elem_id="dislike like")
         
-        b5 = gr.Button(value='Only Like Content', interactive=False, elem_id="like dislike")
+        b5 = gr.Button(value='👍 Content', interactive=False, elem_id="like dislike")
     with gr.Row():
         text = gr.Textbox(interactive=False, visible=True)
         
@@ -613,8 +620,6 @@ for im, txt in [ # TODO more movement
     tmp_df['user:rating'] = [{' ': ' '}]
     tmp_df['gemb'] = [gemb.detach().to('cpu')]
     tmp_df['text'] = [txt]
-
-    
     prevs_df = pd.concat((prevs_df, tmp_df))
 
 
