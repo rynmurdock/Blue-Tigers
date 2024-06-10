@@ -154,7 +154,7 @@ gem_model.generate = MethodType(gemma_portion.generate, gem_model)
 # SEE GEMMA_PORTION FOR PLUCK_LAYER
 
 @spaces.GPU()
-def generate_gemm(prompt='an image of a', in_embs=torch.zeros(1, 1, EMB_LEN),):
+def generate_gemm(prompt='the', in_embs=torch.zeros(1, 1, EMB_LEN),):
   prompt = tokenizer(prompt, return_tensors="pt").to("cuda").input_ids
   in_embs = in_embs / in_embs.abs().max() * 2.4
   text, in_embs = gem_model.generate(prompt, probe_direction=in_embs.squeeze()[None, None, :].to(device='cuda', dtype=dtype), do_sample=True, top_p=.8, max_new_tokens=10)
@@ -590,16 +590,16 @@ def encode_space(x):
 
 # prep our calibration videos
 for im, txt in [ # TODO more movement
-    ('./first.mp4', 'a painted still life'),
-    ('./second.mp4', 'an image of surrealist landscape with solid red circle'),
-    ('./third.mp4', 'an image of abstract art'),
-    ('./fourth.mp4', 'an image of a painted landscape on fire'),
-    ('./fifth.mp4', 'an image of image of a bizarre plant growing from a glass vase'),
-    ('./sixth.mp4', 'an image of dark fractals'),
-    ('./seventh.mp4', 'an image of a dark object'),
+    ('./first.mp4', 'a painted still life in red & bright colors'),
+    ('./second.mp4', 'surrealist landscape with solid red circle'),
+    ('./third.mp4', 'geometric abstract art'),
+    ('./fourth.mp4', 'a painted landscape on fire'),
+    ('./fifth.mp4', 'a bizarre plant growing from a glass vase'),
+    ('./sixth.mp4', 'dark fractals'),
+    ('./seventh.mp4', 'a dark object'),
     ('./eigth.mp4', 'an image: an object; small tree made of green & black wood'),
     ('./ninth.mp4', 'an image of gorgeous flowing art; a sunflower'),
-    ('./tenth.mp4', 'an image of a fluffy creature turns towards you'),
+    ('./tenth.mp4', 'a fluffy creature turns towards you'),
     ]:
     tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'text', 'gemb'])
     tmp_df['paths'] = [im]
