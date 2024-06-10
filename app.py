@@ -154,20 +154,20 @@ gem_model.generate = MethodType(gemma_portion.generate, gem_model)
 # SEE GEMMA_PORTION FOR PLUCK_LAYER
 
 @spaces.GPU()
-def generate_gemm(prompt='A', in_embs=torch.zeros(1, 1, EMB_LEN),):
+def generate_gemm(prompt='An image of', in_embs=torch.zeros(1, 1, EMB_LEN),):
   prompt = tokenizer(prompt, return_tensors="pt").to("cuda").input_ids
-  in_embs = in_embs / in_embs.abs().max() * 2
+  in_embs = in_embs / in_embs.abs().max() * 3
   text, in_embs = gem_model.generate(prompt, probe_direction=in_embs.squeeze()[None, None, :].to(device='cuda', dtype=dtype), do_sample=True, top_p=.8, max_new_tokens=10)
   text = tokenizer.decode(text[0], skip_special_tokens=True)
   print('\n\n\n', text, '\n\n\n')
-  return text, torch.cat(in_embs[1:], 1).mean(1).to('cpu').to(torch.float32)
+  return text, torch.cat(in_embs[-1:], 1).mean(1).to('cpu').to(torch.float32)
 
 @spaces.GPU()
 def cal_generate(prompt, in_embs=torch.zeros(1, 1, EMB_LEN),):
   prompt = tokenizer(prompt, return_tensors="pt").to("cuda").input_ids
   text, in_embs = gem_model.generate(prompt, probe_direction=in_embs.squeeze()[None, None, :].to(device='cuda', dtype=dtype), max_new_tokens=2)
   text = tokenizer.decode(text[0][len(prompt):], skip_special_tokens=True)
-  return text, torch.cat(in_embs, 1).mean(1).to('cpu').to(torch.float32)
+  return text, torch.cat(in_embs[-1:], 1).mean(1).to('cpu').to(torch.float32)
 
 
 @spaces.GPU()
@@ -175,7 +175,7 @@ def generate_gpu(in_im_embs, prompt='the scene'):
     with torch.no_grad():
         print(prompt)
         in_im_embs = in_im_embs.to('cuda').unsqueeze(0).unsqueeze(0)
-        in_im_embs = in_im_embs / in_im_embs.abs().max() * 1
+        in_im_embs = in_im_embs / in_im_embs.abs().max() * 3
         output = pipe(prompt=prompt, guidance_scale=1, added_cond_kwargs={}, ip_adapter_image_embeds=[in_im_embs], num_inference_steps=STEPS)
         im_emb, _ = pipe.encode_image(
                     output.frames[0][len(output.frames[0])//2], 'cuda', 1, output_hidden_state
@@ -231,11 +231,11 @@ def solver(embs, ys):
 
 def get_user_emb(embs, ys):
     # handle case where every instance of calibration videos is 'Neither' or 'Like' or 'Dislike'
-    if len(set(list(ys))) < 1:
+    if len(set(list(ys))) <= 1:
         embs = [i for i in embs]
-        aways = [torch.rand_like(embs[0]) - .5 for i in range(10)]
+        aways = [torch.rand_like(embs[0]) - .5 for i in range(4)]
         embs += aways
-        awal = [0 for i in range(5)] + [1 for i in range(5)]
+        awal = [0 for i in range(2)] + [1 for i in range(2)]
         ys += awal
     
     indices = list(range(len(embs)))
@@ -260,8 +260,8 @@ def get_user_emb(embs, ys):
     #feature_embs = scaler.transform(feature_embs)
     chosen_y = np.array([ys[i] for i in indices])
     
-    if torch.all(feature_embs.norm(-1) != torch.zeros_like(feature_embs.norm(-1))):
-        feature_embs = feature_embs / feature_embs.norm(-1, keepdim=True) * np.sqrt(feature_embs.shape[-1])
+    #if torch.all(feature_embs.norm(-1) != torch.zeros_like(feature_embs.norm(-1))):
+    #    feature_embs = feature_embs / feature_embs.norm(-1, keepdim=True) * np.sqrt(feature_embs.shape[-1])
     
     #lin_class = Ridge(fit_intercept=False).fit(feature_embs, chosen_y)
     #lin_class = SVC(max_iter=20, kernel='linear', C=.1, class_weight='balanced').fit(feature_embs, chosen_y)
