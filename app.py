@@ -126,7 +126,8 @@ pipe.enable_vae_slicing()
 pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15_vit-G.bin", map_location='cpu')
 # This IP adapter improves outputs substantially.
 target_blocks = {"up": {"block_1": 1}}
-pipe.set_ip_adapter_scale(target_blocks)
+
+pipe.set_ip_adapter_scale(.3)
 
 
 
@@ -154,10 +155,10 @@ gem_model.generate = MethodType(gemma_portion.generate, gem_model)
 # SEE GEMMA_PORTION FOR PLUCK_LAYER
 
 @spaces.GPU()
-def generate_gemm(prompt='An image of', in_embs=torch.zeros(1, 1, EMB_LEN),):
+def generate_gemm(prompt='The image shows', in_embs=torch.zeros(1, 1, EMB_LEN),):
   prompt = tokenizer(prompt, return_tensors="pt").to("cuda").input_ids
-  in_embs = in_embs / in_embs.abs().max() * 3
-  text, in_embs = gem_model.generate(prompt, probe_direction=in_embs.squeeze()[None, None, :].to(device='cuda', dtype=dtype), do_sample=True, top_p=.8, max_new_tokens=10)
+  in_embs = in_embs / in_embs.abs().max() * 2.4
+  text, in_embs = gem_model.generate(prompt, probe_direction=in_embs.squeeze()[None, None, :].to(device='cuda', dtype=dtype), do_sample=True, top_p=.93, max_new_tokens=10)
   text = tokenizer.decode(text[0], skip_special_tokens=True)
   print('\n\n\n', text, '\n\n\n')
   return text, torch.cat(in_embs[-1:], 1).mean(1).to('cpu').to(torch.float32)
