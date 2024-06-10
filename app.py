@@ -122,12 +122,14 @@ pipe.enable_vae_slicing()
 #repo = "ByteDance/AnimateDiff-Lightning"
 #ckpt = f"animatediff_lightning_4step_diffusers.safetensors"
 
-target_blocks = {"up": {"block_1": [1.0]}}
-pipe.set_ip_adapter_scale(target_blocks)
 
 pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15_vit-G.bin", map_location='cpu')
 # This IP adapter improves outputs substantially.
-pipe.set_ip_adapter_scale(.4)#.8
+target_blocks = {"up": {"block_1": [1.0]}}
+pipe.set_ip_adapter_scale(target_blocks)
+
+
+
 pipe.unet.fuse_qkv_projections()
 #pipe.enable_free_init(method="gaussian", use_fast_sampling=True)
 
@@ -154,7 +156,7 @@ gem_model.generate = MethodType(gemma_portion.generate, gem_model)
 @spaces.GPU()
 def generate_gemm(prompt='an image of a', in_embs=torch.zeros(1, 1, EMB_LEN),):
   prompt = tokenizer(prompt, return_tensors="pt").to("cuda").input_ids
-  in_embs = in_embs / in_embs.abs().max() * 2
+  in_embs = in_embs / in_embs.abs().max() * 2.4
   text, in_embs = gem_model.generate(prompt, probe_direction=in_embs.squeeze()[None, None, :].to(device='cuda', dtype=dtype), do_sample=True, top_p=.8, max_new_tokens=10)
   text = tokenizer.decode(text[0], skip_special_tokens=True)
   print('\n\n\n', text, '\n\n\n')
@@ -391,8 +393,8 @@ def start(_, calibrate_prompts, user_id, request: gr.Request):
             gr.Button(value='Neither (Space)', interactive=True, visible=False), 
             gr.Button(value='Dislike', interactive=True),
             gr.Button(value='Start', interactive=False),
-            gr.Button(value='Like Content Dislike Style', interactive=True),
-            gr.Button(value='Dislike Content Like Style', interactive=True),
+            gr.Button(value='Only Like Content', interactive=True),
+            gr.Button(value='Only Like Style', interactive=True),
             image,
             calibrate_prompts,
             user_id
@@ -410,9 +412,9 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
         return img, calibrate_prompts, text
     elif choice == 'Dislike':
         choice = [0, 0]
-    elif choice == 'Dislike Content Like Style':
+    elif choice == 'Only Like Style':
         choice = [0, 1]
-    elif choice == 'Like Content Dislike Style':
+    elif choice == 'Only Like Content':
         choice = [1, 0]
     else:
         assert False, f'choice is {choice}'
@@ -502,8 +504,6 @@ Explore the latent space without text prompts based on your preferences. Learn m
     def l():
         return None
 
-    with gr.Row():
-        text = gr.Textbox(interactive=False, visible=False)
     with gr.Row(elem_id='output-image'):
         img = gr.Video(
         label='Lightning',
@@ -515,6 +515,9 @@ Explore the latent space without text prompts based on your preferences. Learn m
         elem_id="video_output"
        )
         img.play(l, js='''document.querySelector('[data-testid="Lightning-player"]').loop = true''')
+    
+    
+    
     with gr.Row(equal_height=True):
         b3 = gr.Button(value='Dislike', interactive=False, elem_id="dislike")
 
@@ -522,11 +525,11 @@ Explore the latent space without text prompts based on your preferences. Learn m
 
         b1 = gr.Button(value='Like', interactive=False, elem_id="like")
     with gr.Row(equal_height=True):
-        b6 = gr.Button(value='Dislike Content Like Style', interactive=False, elem_id="dislike like")
+        b6 = gr.Button(value='Only Like Style', interactive=False, elem_id="dislike like")
         
-        b5 = gr.Button(value='Like Content Dislike Style', interactive=False, elem_id="like dislike")
-        
-        
+        b5 = gr.Button(value='Only Like Content', interactive=False, elem_id="like dislike")
+    with gr.Row():
+        text = gr.Textbox(interactive=False, visible=True)
         
         
         b1.click(
@@ -587,7 +590,7 @@ def encode_space(x):
 
 # prep our calibration videos
 for im, txt in [ # TODO more movement
-    ('./first.mp4', 'an image of a painted still life'),
+    ('./first.mp4', 'a painted still life'),
     ('./second.mp4', 'an image of surrealist landscape with solid red circle'),
     ('./third.mp4', 'an image of abstract art'),
     ('./fourth.mp4', 'an image of a painted landscape on fire'),
