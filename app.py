@@ -14,9 +14,6 @@ dtype = torch.bfloat16
 # gemma
 EMB_LEN = 768
 
-from text_portion import get_text_embs
-
-
 import spaces
 
 import matplotlib.pyplot as plt
@@ -92,6 +89,22 @@ def imio_write_video(file_name, images, fps=15):
 
 image_encoder = CLIPVisionModelWithProjection.from_pretrained("h94/IP-Adapter", subfolder="sdxl_models/image_encoder", torch_dtype=dtype, 
 device_map='cuda')
+
+from transformers import CLIPProcessor, CLIPModel
+other_clip = CLIPModel.from_pretrained("openai/clip-vit-large-patch14").to('cuda').to(torch.bfloat16)
+processor = CLIPProcessor.from_pretrained("openai/clip-vit-large-patch14")
+
+def get_other_embs(pil_img):
+    inputs = processor(images=pil_img, return_tensors="pt").to('cuda').to(torch.bfloat16)
+    return other_clip.get_image_features(**inputs)
+
+# TODO you need to use CM as a gemb (we're using IP Adapter embeddings in in_emb) & then transform 
+#   per The CLIP Model is Secretly an Image-to-Prompt Converter
+
+# isolate & TODO try out in a notebook
+W = torch.clone(other_clip.text_projection.weight).detach().to(torch.bfloat16).to('cuda').to(torch.bfloat16)
+Wp = torch.linalg.pinv(W.float(), rtol=.3).to(torch.bfloat16)
+
 #vae = AutoencoderTiny.from_pretrained("madebyollin/taesd", torch_dtype=dtype)
 
 # vae = ConsistencyDecoderVAE.from_pretrained("openai/consistency-decoder", torch_dtype=dtype)
@@ -117,9 +130,8 @@ pipe.fuse_lora()
 pipe.enable_attention_slicing()
 pipe.enable_vae_slicing()
 
-from text_portion import CLIPTextModel
 
-pipe.text_encoder = CLIPTextModel.from_pretrained('runwayml/stable-diffusion-v1-5', subfolder='text_encoder').to(torch.bfloat16).to('cuda')
+#pipe.text_encoder = CLIPTextModel.from_pretrained('runwayml/stable-diffusion-v1-5', subfolder='text_encoder').to(torch.bfloat16).to('cuda')
 
 
 
@@ -132,9 +144,9 @@ pipe.text_encoder = CLIPTextModel.from_pretrained('runwayml/stable-diffusion-v1-
 pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15_vit-G.bin", map_location='cpu')
 # This IP adapter improves outputs substantially.
 #target_blocks = {"up": 1}
-pipe.set_ip_adapter_scale(.9)
 
-
+# TODO determine best way forward on adapter v text from image emb
+pipe.set_ip_adapter_scale(.7)
 
 pipe.unet.fuse_qkv_projections()
 #pipe.enable_free_init(method="gaussian", use_fast_sampling=True)
@@ -143,21 +155,40 @@ pipe.to(device=DEVICE)
 #pipe.unet = torch.compile(pipe.unet)
 #pipe.vae = torch.compile(pipe.vae)
 
+
 @spaces.GPU()
-def generate_gpu(in_im_embs, in_gembs):
+def generate_gpu(in_im_embs, gembs):
     with torch.no_grad():
         in_im_embs = in_im_embs.to('cuda').unsqueeze(0).unsqueeze(0)
         in_im_embs = in_im_embs / in_im_embs.abs().max() * 3
+        
+        gembs = gembs.to('cuda').to(torch.bfloat16)
+        gembs = gembs / gembs.abs().max() * 1
+        in_gembs = (27 / gembs.norm(1) *
+                    Wp @ gembs[0])
+                    
+
+        soser = pipe.tokenizer('a', return_tensors='pt').input_ids.to('cuda')
+        ooo = other_clip.text_model(soser, output_hidden_states=True).last_hidden_state
+        #ooo[:, 1:4] = ooo[:, 1:4] + in_gembs.view(1, 1, 768).repeat(1, 3, 1)
+        sos = ooo[:, :1]
+        #eos = ooo[:, 2].unsqueeze(0)
+        in_gembs = torch.cat([sos, in_gembs.unsqueeze(0).repeat(1, 76, 1)], 1)
+        #in_gembs = torch.cat([sos, in_gembs.unsqueeze(0).repeat(1, 10, 1), eos.repeat(1, 66, 1)], 1)
+        
         output = pipe(prompt_embeds=in_gembs, guidance_scale=1, added_cond_kwargs={}, ip_adapter_image_embeds=[in_im_embs], num_inference_steps=STEPS)
         im_emb, _ = pipe.encode_image(
                     output.frames[0][len(output.frames[0])//2], 'cuda', 1, output_hidden_state
                 )
         im_emb = im_emb.detach().to('cpu').to(torch.float32)
-    return output, im_emb
+        
+        gemb = get_other_embs(output.frames[0][len(output.frames[0])//2])
+        gemb = gemb.detach().to('cpu').to(torch.float32)
+    return output, im_emb, gemb
 
 
-def generate(in_im_embs, in_gembs):
-    output, im_emb = generate_gpu(in_im_embs, in_gembs)
+def generate(in_im_embs, gembs):
+    output, im_emb, gemb = generate_gpu(in_im_embs, gembs)
     nsfw = maybe_nsfw(output.frames[0][len(output.frames[0])//2])
     
     name = str(uuid.uuid4()).replace("-", "")
@@ -172,7 +203,7 @@ def generate(in_im_embs, in_gembs):
     output.frames[0] = output.frames[0] + list(reversed(output.frames[0]))
 
     write_video(path, output.frames[0])
-    return path, im_emb
+    return path, im_emb, gemb
 
 
 #######################
@@ -210,13 +241,14 @@ def get_user_emb(embs, ys):
         ys += awal
     
     indices = list(range(len(embs)))
+    indices = random.sample(indices, min(8, len(indices))) # USE AT MOST N ratings.
     # sample only as many negatives as there are positives
-    #pos_indices = [i for i in indices if ys[i] == 1]
-    #neg_indices = [i for i in indices if ys[i] == 0]
-    #lower = min(len(pos_indices), len(neg_indices))
-    #neg_indices = random.sample(neg_indices, lower)
-    #pos_indices = random.sample(pos_indices, lower)
-    #indices = pos_indices + neg_indices
+    pos_indices = [i for i in indices if ys[i] == 1]
+    neg_indices = [i for i in indices if ys[i] == 0]
+    lower = max(min(len(pos_indices), len(neg_indices)), 1)
+    neg_indices = random.sample(neg_indices, lower)
+    pos_indices = random.sample(pos_indices, lower)
+    indices = pos_indices + neg_indices
     
     
     # we may have just encountered a rare multi-threading diffusers issue (https://github.com/huggingface/diffusers/issues/5749);
@@ -299,10 +331,7 @@ def background_next_image():
             
             if len(gembs) > 4:
                 new_gem = get_user_emb(gembs, [y[0] for y in ys])
-                in_gembs, gemb = get_text_embs(in_embs=new_gem, pipe=pipe)
-            else:
-                in_gembs, _ = get_text_embs(in_embs=torch.zeros(1, EMB_LEN), pipe=pipe)
-            img, embs = generate(user_emb, in_gembs)
+            img, embs, gemb = generate(user_emb, new_gem)
             
             if img:
                 tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'latest_user_to_rate', 'text', 'gemb'])
@@ -351,7 +380,7 @@ def next_image(calibrate_prompts, user_id):
             ys_here = [y[1] for y in ys]
             user_emb = get_user_emb(embs, ys_here)
             image, text = pluck_img(user_id, user_emb)
-            return image, calibrate_prompts, text
+            return image, calibrate_prompts, ''
 
 
 
@@ -369,8 +398,8 @@ def start(_, calibrate_prompts, user_id, request: gr.Request):
             gr.Button(value='Neither (Space)', interactive=True, visible=False), 
             gr.Button(value='👎', interactive=True),
             gr.Button(value='Start', interactive=False),
-            gr.Button(value='👍 Content', interactive=True),
-            gr.Button(value='👍 Style', interactive=True),
+            gr.Button(value='👍 Content', interactive=False, visible=False),
+            gr.Button(value='👍 Style', interactive=False, visible=False),
             image,
             calibrate_prompts,
             user_id,
@@ -502,9 +531,9 @@ Explore the latent space without text prompts based on your preferences. Learn m
 
         b1 = gr.Button(value='👍', interactive=False, elem_id="like")
     with gr.Row(equal_height=True):
-        b6 = gr.Button(value='👍 Style', interactive=False, elem_id="dislike like")
+        b6 = gr.Button(value='👍 Style', interactive=False, visible=False, elem_id="dislike like")
         
-        b5 = gr.Button(value='👍 Content', interactive=False, elem_id="like dislike")
+        b5 = gr.Button(value='👍 Content', interactive=False, visible=False, elem_id="like dislike")
     with gr.Row():
         text = gr.Textbox(interactive=False, visible=False)
         
@@ -563,7 +592,11 @@ def encode_space(x):
     im_emb, _ = pipe.encode_image(
                 image, DEVICE, 1, output_hidden_state
             )
-    return im_emb.detach().to('cpu').to(torch.float32)
+            
+    gemb = get_other_embs(x)
+    gemb = gemb.detach().to('cpu').to(torch.float32)
+    
+    return im_emb.detach().to('cpu').to(torch.float32), gemb
 
 # prep our calibration videos
 for im, txt in [ # TODO more movement
@@ -582,13 +615,13 @@ for im, txt in [ # TODO more movement
     tmp_df['paths'] = [im]
     image = list(imageio.imiter(im))
     image = image[len(image)//2]
-    im_emb = encode_space(image)
+    im_emb, gemb = encode_space(image)
     
-    _, gemb = get_text_embs(prompt=txt, pipe=pipe)
+    # _, gemb = get_text_embs(prompt=txt, pipe=pipe)
 
     tmp_df['embeddings'] = [im_emb.detach().to('cpu')]
     tmp_df['user:rating'] = [{' ': ' '}]
-    tmp_df['gemb'] = [gemb.detach().to('cpu')]
+    tmp_df['gemb'] = [gemb]
     tmp_df['text'] = [txt]
     prevs_df = pd.concat((prevs_df, tmp_df))
 
