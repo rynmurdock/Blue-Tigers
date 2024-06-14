@@ -101,16 +101,20 @@ class GemmaDecoderLayer(nn.Module):
             cache_position=cache_position,
         )
         hidden_states = residual + hidden_states
-        if layern == PLUCK_LAYER:
-            hidden_states = hidden_states + probe_direction
-            new_activations = hidden_states
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
-        
+
+
+        if layern == PLUCK_LAYER:
+            hidden_states = hidden_states + probe_direction
+            new_activations = hidden_states
+
+
+
         outputs = (hidden_states,)
 
         if output_attentions:

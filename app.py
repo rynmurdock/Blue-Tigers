@@ -100,7 +100,7 @@ device_map='cuda')
 #unet = UNet2DConditionModel.from_pretrained(finetune_path+'/unet/').to(dtype)
 #text_encoder = CLIPTextModel.from_pretrained(finetune_path+'/text_encoder/').to(dtype)
 
-
+#rynmurdock/Sea_Claws
 unet = UNet2DConditionModel.from_pretrained('rynmurdock/Sea_Claws', subfolder='unet',).to(dtype).to('cpu')
 text_encoder = CLIPTextModel.from_pretrained('rynmurdock/Sea_Claws', subfolder='text_encoder', 
 device_map='cpu').to(dtype)
@@ -125,9 +125,8 @@ pipe.enable_vae_slicing()
 
 pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15_vit-G.bin", map_location='cpu')
 # This IP adapter improves outputs substantially.
-target_blocks = {"up": {"block_1": 1}}
-
-pipe.set_ip_adapter_scale(.3)
+target_blocks = {"up": 1}
+# pipe.set_ip_adapter_scale(.5)
 
 
 
@@ -155,20 +154,20 @@ gem_model.generate = MethodType(gemma_portion.generate, gem_model)
 # SEE GEMMA_PORTION FOR PLUCK_LAYER
 
 @spaces.GPU()
-def generate_gemm(prompt='The image shows', in_embs=torch.zeros(1, 1, EMB_LEN),):
+def generate_gemm(prompt='describe the scene:', in_embs=torch.zeros(1, 1, EMB_LEN),):
   prompt = tokenizer(prompt, return_tensors="pt").to("cuda").input_ids
   in_embs = in_embs / in_embs.abs().max() * 2.4
   text, in_embs = gem_model.generate(prompt, probe_direction=in_embs.squeeze()[None, None, :].to(device='cuda', dtype=dtype), do_sample=True, top_p=.93, max_new_tokens=10)
   text = tokenizer.decode(text[0], skip_special_tokens=True)
   print('\n\n\n', text, '\n\n\n')
-  return text, torch.cat(in_embs[-1:], 1).mean(1).to('cpu').to(torch.float32)
+  return text, torch.cat(in_embs[1:], 1).mean(1).to('cpu').to(torch.float32)
 
 @spaces.GPU()
 def cal_generate(prompt, in_embs=torch.zeros(1, 1, EMB_LEN),):
   prompt = tokenizer(prompt, return_tensors="pt").to("cuda").input_ids
   text, in_embs = gem_model.generate(prompt, probe_direction=in_embs.squeeze()[None, None, :].to(device='cuda', dtype=dtype), max_new_tokens=2)
   text = tokenizer.decode(text[0][len(prompt):], skip_special_tokens=True)
-  return text, torch.cat(in_embs[-1:], 1).mean(1).to('cpu').to(torch.float32)
+  return text, torch.cat(in_embs[1:], 1).mean(1).to('cpu').to(torch.float32)
 
 
 @spaces.GPU()
@@ -405,7 +404,8 @@ def start(_, calibrate_prompts, user_id, request: gr.Request):
             gr.Button(value='👍 Style', interactive=True),
             image,
             calibrate_prompts,
-            user_id
+            user_id,
+            text
             ]
 
 
@@ -569,7 +569,7 @@ Explore the latent space without text prompts based on your preferences. Learn m
         b4 = gr.Button(value='Start')
         b4.click(start,
                  [b4, calibrate_prompts, user_id],
-                 [b1, b2, b3, b4, b5, b6, img, calibrate_prompts, user_id]
+                 [b1, b2, b3, b4, b5, b6, img, calibrate_prompts, user_id, text]
                  )
     with gr.Row():
         html = gr.HTML('''<div style='text-align:center; font-size:20px'>You will calibrate for several videos and then roam. </ div><br><br><br>
@@ -598,16 +598,16 @@ def encode_space(x):
 
 # prep our calibration videos
 for im, txt in [ # TODO more movement
-    ('./first.mp4', 'a painted still life in red & bright colors'),
-    ('./second.mp4', 'surrealist landscape with solid red circle'),
-    ('./third.mp4', 'geometric abstract art'),
-    ('./fourth.mp4', 'a painted landscape on fire'),
-    ('./fifth.mp4', 'a bizarre plant growing from a glass vase'),
-    ('./sixth.mp4', 'dark fractals'),
-    ('./seventh.mp4', 'a dark object'),
-    ('./eigth.mp4', 'an image: an object; small tree made of green & black wood'),
-    ('./ninth.mp4', 'an image of gorgeous flowing art; a sunflower'),
-    ('./tenth.mp4', 'a fluffy creature turns towards you'),
+    ('./first.mp4', 'describe the scene: a painted still life in red & bright colors'),
+    ('./second.mp4', 'describe the scene: surrealist landscape with solid red circle'),
+    ('./third.mp4', 'describe the scene: geometric abstract art'),
+    ('./fourth.mp4', 'describe the scene: a painted landscape on fire'),
+    ('./fifth.mp4', 'describe the scene: a bizarre plant growing from a glass vase'),
+    ('./sixth.mp4', 'describe the scene: dark fractals'),
+    ('./seventh.mp4', 'describe the scene: a dark object'),
+    ('./eigth.mp4', 'describe the scene: an image: an object; small tree made of green & black wood'),
+    ('./ninth.mp4', 'describe the scene: an image of gorgeous flowing art; a sunflower'),
+    ('./tenth.mp4', 'describe the scene: a fluffy creature turns towards you'),
     ]:
     tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'text', 'gemb'])
     tmp_df['paths'] = [im]
@@ -626,4 +626,4 @@ for im, txt in [ # TODO more movement
 
 demo.launch(share=True, server_port=8443)
 
-Neither
+
