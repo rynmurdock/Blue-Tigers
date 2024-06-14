@@ -98,10 +98,8 @@ def get_other_embs(pil_img):
     inputs = processor(images=pil_img, return_tensors="pt").to('cuda').to(torch.bfloat16)
     return other_clip.get_image_features(**inputs)
 
-# TODO you need to use CM as a gemb (we're using IP Adapter embeddings in in_emb) & then transform 
-#   per The CLIP Model is Secretly an Image-to-Prompt Converter
 
-# isolate & TODO try out in a notebook
+# from "The CLIP Model is Secretly an Image-to-Prompt Converter"
 W = torch.clone(other_clip.text_projection.weight).detach().to(torch.bfloat16).to('cuda').to(torch.bfloat16)
 Wp = torch.linalg.pinv(W.float(), rtol=.3).to(torch.bfloat16)
 
@@ -241,7 +239,7 @@ def get_user_emb(embs, ys):
         ys += awal
     
     indices = list(range(len(embs)))
-    indices = random.sample(indices, min(8, len(indices))) # USE AT MOST N ratings.
+    indices = random.sample(indices, min(30, len(indices))) # USE AT MOST N ratings.
     # sample only as many negatives as there are positives
     pos_indices = [i for i in indices if ys[i] == 1]
     neg_indices = [i for i in indices if ys[i] == 0]
