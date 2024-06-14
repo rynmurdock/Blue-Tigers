@@ -12,8 +12,9 @@ device = "cuda"
 dtype = torch.bfloat16
 
 # gemma
-EMB_LEN = 3072
+EMB_LEN = 768
 
+from text_portion import get_text_embs
 
 
 import spaces
@@ -116,6 +117,11 @@ pipe.fuse_lora()
 pipe.enable_attention_slicing()
 pipe.enable_vae_slicing()
 
+from text_portion import CLIPTextModel
+
+pipe.text_encoder = CLIPTextModel.from_pretrained('runwayml/stable-diffusion-v1-5', subfolder='text_encoder').to(torch.bfloat16).to('cuda')
+
+
 
 #pipe = AnimateDiffPipeline.from_pretrained('emilianJR/epiCRealism', torch_dtype=dtype, image_encoder=image_encoder)
 #pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing", beta_schedule="linear")
@@ -125,8 +131,8 @@ pipe.enable_vae_slicing()
 
 pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15_vit-G.bin", map_location='cpu')
 # This IP adapter improves outputs substantially.
-target_blocks = {"up": 1}
-# pipe.set_ip_adapter_scale(.5)
+#target_blocks = {"up": 1}
+pipe.set_ip_adapter_scale(.9)
 
 
 
@@ -137,46 +143,12 @@ pipe.to(device=DEVICE)
 #pipe.unet = torch.compile(pipe.unet)
 #pipe.vae = torch.compile(pipe.vae)
 
-
-from types import MethodType
-
-from transformers import AutoTokenizer
-
-import gemma_portion
-
-tokenizer = AutoTokenizer.from_pretrained("google/gemma-7b-it",)
-gem_model = gemma_portion.GemmaForCausalLM.from_pretrained("google/gemma-7b-it", 
-                                                                device_map="auto", 
-                                                                torch_dtype=torch.bfloat16, load_in_4bit=True)
-gem_model._sample = MethodType(gemma_portion._sample, gem_model)
-gem_model.generate = MethodType(gemma_portion.generate, gem_model)
-
-# SEE GEMMA_PORTION FOR PLUCK_LAYER
-
 @spaces.GPU()
-def generate_gemm(prompt='describe the scene:', in_embs=torch.zeros(1, 1, EMB_LEN),):
-  prompt = tokenizer(prompt, return_tensors="pt").to("cuda").input_ids
-  in_embs = in_embs / in_embs.abs().max() * 2.4
-  text, in_embs = gem_model.generate(prompt, probe_direction=in_embs.squeeze()[None, None, :].to(device='cuda', dtype=dtype), do_sample=True, top_p=.93, max_new_tokens=10)
-  text = tokenizer.decode(text[0], skip_special_tokens=True)
-  print('\n\n\n', text, '\n\n\n')
-  return text, torch.cat(in_embs[1:], 1).mean(1).to('cpu').to(torch.float32)
-
-@spaces.GPU()
-def cal_generate(prompt, in_embs=torch.zeros(1, 1, EMB_LEN),):
-  prompt = tokenizer(prompt, return_tensors="pt").to("cuda").input_ids
-  text, in_embs = gem_model.generate(prompt, probe_direction=in_embs.squeeze()[None, None, :].to(device='cuda', dtype=dtype), max_new_tokens=2)
-  text = tokenizer.decode(text[0][len(prompt):], skip_special_tokens=True)
-  return text, torch.cat(in_embs[1:], 1).mean(1).to('cpu').to(torch.float32)
-
-
-@spaces.GPU()
-def generate_gpu(in_im_embs, prompt='the scene'):
+def generate_gpu(in_im_embs, in_gembs):
     with torch.no_grad():
-        print(prompt)
         in_im_embs = in_im_embs.to('cuda').unsqueeze(0).unsqueeze(0)
         in_im_embs = in_im_embs / in_im_embs.abs().max() * 3
-        output = pipe(prompt=prompt, guidance_scale=1, added_cond_kwargs={}, ip_adapter_image_embeds=[in_im_embs], num_inference_steps=STEPS)
+        output = pipe(prompt_embeds=in_gembs, guidance_scale=1, added_cond_kwargs={}, ip_adapter_image_embeds=[in_im_embs], num_inference_steps=STEPS)
         im_emb, _ = pipe.encode_image(
                     output.frames[0][len(output.frames[0])//2], 'cuda', 1, output_hidden_state
                 )
@@ -184,8 +156,8 @@ def generate_gpu(in_im_embs, prompt='the scene'):
     return output, im_emb
 
 
-def generate(in_im_embs, prompt='the scene'):
-    output, im_emb = generate_gpu(in_im_embs, prompt)
+def generate(in_im_embs, in_gembs):
+    output, im_emb = generate_gpu(in_im_embs, in_gembs)
     nsfw = maybe_nsfw(output.frames[0][len(output.frames[0])//2])
     
     name = str(uuid.uuid4()).replace("-", "")
@@ -212,7 +184,6 @@ def generate(in_im_embs, prompt='the scene'):
 
 @spaces.GPU()
 def solver(embs, ys):
-    print('ys:', ys,'EMBS:', embs.shape, embs)
     ys = torch.tensor(ys).to('cpu', dtype=torch.float32).squeeze().unsqueeze(1)
     
 #     if ys.abs().max() != 0:
@@ -324,16 +295,14 @@ def background_next_image():
                 continue
             
             embs, ys, gembs = pluck_embs_ys(uid)
-            
             user_emb = get_user_emb(embs, [y[1] for y in ys])
             
             if len(gembs) > 4:
                 new_gem = get_user_emb(gembs, [y[0] for y in ys])
-                text, _ = generate_gemm(in_embs=new_gem)
-                _, gembs = cal_generate(prompt=text)
+                in_gembs, gemb = get_text_embs(in_embs=new_gem, pipe=pipe)
             else:
-                text, gembs = generate_gemm(in_embs=torch.zeros(1, EMB_LEN))
-            img, embs = generate(user_emb, text)
+                in_gembs, _ = get_text_embs(in_embs=torch.zeros(1, EMB_LEN), pipe=pipe)
+            img, embs = generate(user_emb, in_gembs)
             
             if img:
                 tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'latest_user_to_rate', 'text', 'gemb'])
@@ -342,7 +311,7 @@ def background_next_image():
                 tmp_df['user:rating'] = [{' ': ' '}]
                 tmp_df['from_user_id'] = [uid]
                 tmp_df['text'] = [text]
-                tmp_df['gemb'] = [gembs]
+                tmp_df['gemb'] = [gemb]
                 prevs_df = pd.concat((prevs_df, tmp_df))
                 # we can free up storage by deleting the image
                 if len(prevs_df) > 500:
@@ -537,7 +506,7 @@ Explore the latent space without text prompts based on your preferences. Learn m
         
         b5 = gr.Button(value='👍 Content', interactive=False, elem_id="like dislike")
     with gr.Row():
-        text = gr.Textbox(interactive=False, visible=True)
+        text = gr.Textbox(interactive=False, visible=False)
         
         
         b1.click(
@@ -615,7 +584,7 @@ for im, txt in [ # TODO more movement
     image = image[len(image)//2]
     im_emb = encode_space(image)
     
-    _, gemb = cal_generate(prompt=txt)
+    _, gemb = get_text_embs(prompt=txt, pipe=pipe)
 
     tmp_df['embeddings'] = [im_emb.detach().to('cpu')]
     tmp_df['user:rating'] = [{' ': ' '}]
