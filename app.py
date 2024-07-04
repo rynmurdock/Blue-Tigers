@@ -16,6 +16,8 @@ EMB_LEN = 3072
 
 
 
+
+
 import spaces
 
 import matplotlib.pyplot as plt
@@ -48,6 +50,10 @@ prevs_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'l
 
 import spaces
 start_time = time.time()
+
+prompt_list = [p for p in list(set(
+                pd.read_csv('./twitter_prompts.csv').iloc[:, 1].tolist())) if type(p) == str]
+
 
 ####################### Setup Model
 from diffusers import AnimateDiffPipeline, MotionAdapter, EulerDiscreteScheduler, LCMScheduler, AutoencoderTiny, UNet2DConditionModel, AutoencoderKL
@@ -101,8 +107,8 @@ device_map='cuda')
 #text_encoder = CLIPTextModel.from_pretrained(finetune_path+'/text_encoder/').to(dtype)
 
 #rynmurdock/Sea_Claws
-unet = UNet2DConditionModel.from_pretrained('rynmurdock/Sea_Claws', subfolder='unet',).to(dtype).to('cpu')
-text_encoder = CLIPTextModel.from_pretrained('rynmurdock/Sea_Claws', subfolder='text_encoder', 
+unet = UNet2DConditionModel.from_pretrained('emilianJR/epiCRealism', subfolder='unet',).to(dtype).to('cpu')
+text_encoder = CLIPTextModel.from_pretrained('emilianJR/epiCRealism', subfolder='text_encoder', 
 device_map='cpu').to(dtype)
 
 adapter = MotionAdapter.from_pretrained("wangfuyun/AnimateLCM")
@@ -155,7 +161,7 @@ gem_model.generate = MethodType(gemma_portion.generate, gem_model)
 
 @spaces.GPU()
 def generate_gemm(prompt='describe a compelling scene:', in_embs=torch.zeros(1, 1, EMB_LEN),):
-  prompt = tokenizer(prompt, return_tensors="pt").to("cuda").input_ids
+  prompt = tokenizer(text=prompt, return_tensors="pt").to("cuda").input_ids
   in_embs = in_embs / in_embs.abs().max() * 2
   text, in_embs = gem_model.generate(prompt, probe_direction=in_embs.squeeze()[None, None, :].to(device='cuda', dtype=dtype), do_sample=True, top_p=.7, max_new_tokens=20)
   text = tokenizer.decode(text[0], skip_special_tokens=True)
@@ -335,9 +341,20 @@ def background_next_image():
             
             user_emb = get_user_emb(embs, [y[1] for y in ys])
             
+
+            global glob_idx
+            glob_idx += 1
+            if glob_idx >= (len(prompt_list)-1):
+                glob_idx = 0
+
+
+            if glob_idx % 7 == 0:
+                text = prompt_list[glob_idx]
+            else:
+                text = 'describe a compelling scene:'
             if len(gembs) > 4:
                 new_gem = get_user_emb(gembs, [y[0] for y in ys])
-                text, _ = generate_gemm(in_embs=new_gem)
+                text, _ = generate_gemm(in_embs=new_gem, prompt=text)
                 _, gembs = cal_generate(prompt=text)
             else:
                 text, gembs = generate_gemm(in_embs=torch.zeros(1, EMB_LEN))
@@ -631,7 +648,7 @@ for im, txt in [ # TODO more movement
     tmp_df['text'] = [txt]
     prevs_df = pd.concat((prevs_df, tmp_df))
 
-
+glob_idx = 0
 demo.launch(share=True, server_port=8443)
 
 
