@@ -125,8 +125,8 @@ pipe.enable_vae_slicing()
 
 pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15_vit-G.bin", map_location='cpu')
 # This IP adapter improves outputs substantially.
-target_blocks = {"up": 1}
-# pipe.set_ip_adapter_scale(.5)
+target_blocks = {"up": {'block_1': 1.}, "mid": 1.}
+pipe.set_ip_adapter_scale(target_blocks)
 
 
 
@@ -154,10 +154,10 @@ gem_model.generate = MethodType(gemma_portion.generate, gem_model)
 # SEE GEMMA_PORTION FOR PLUCK_LAYER
 
 @spaces.GPU()
-def generate_gemm(prompt='describe the scene:', in_embs=torch.zeros(1, 1, EMB_LEN),):
+def generate_gemm(prompt='describe a compelling scene:', in_embs=torch.zeros(1, 1, EMB_LEN),):
   prompt = tokenizer(prompt, return_tensors="pt").to("cuda").input_ids
-  in_embs = in_embs / in_embs.abs().max() * 2.4
-  text, in_embs = gem_model.generate(prompt, probe_direction=in_embs.squeeze()[None, None, :].to(device='cuda', dtype=dtype), do_sample=True, top_p=.93, max_new_tokens=10)
+  in_embs = in_embs / in_embs.abs().max() * 2
+  text, in_embs = gem_model.generate(prompt, probe_direction=in_embs.squeeze()[None, None, :].to(device='cuda', dtype=dtype), do_sample=True, top_p=.7, max_new_tokens=20)
   text = tokenizer.decode(text[0], skip_special_tokens=True)
   print('\n\n\n', text, '\n\n\n')
   return text, torch.cat(in_embs[1:], 1).mean(1).to('cpu').to(torch.float32)
@@ -231,21 +231,29 @@ def solver(embs, ys):
 
 def get_user_emb(embs, ys):
     # handle case where every instance of calibration videos is 'Neither' or 'Like' or 'Dislike'
-    if len(set(list(ys))) <= 1:
+
+    indices = random.sample(list(range(len(embs))), len(embs)//2) # sample half
+    # sample only as many negatives as there are positives
+    pos_indices = [i for i in indices if ys[i] == 1]
+    neg_indices = [i for i in indices if ys[i] == 0]
+
+    if len(neg_indices) <= 1 or len(pos_indices) <= 1:
         embs = [i for i in embs]
         aways = [torch.rand_like(embs[0]) - .5 for i in range(4)]
         embs += aways
         awal = [0 for i in range(2)] + [1 for i in range(2)]
         ys += awal
-    
-    indices = list(range(len(embs)))
-    # sample only as many negatives as there are positives
-    #pos_indices = [i for i in indices if ys[i] == 1]
-    #neg_indices = [i for i in indices if ys[i] == 0]
-    #lower = min(len(pos_indices), len(neg_indices))
-    #neg_indices = random.sample(neg_indices, lower)
-    #pos_indices = random.sample(pos_indices, lower)
-    #indices = pos_indices + neg_indices
+
+        indices = random.sample(list(range(len(embs))), len(embs)//2) # sample half
+        # sample only as many negatives as there are positives
+        pos_indices = [i for i in indices if ys[i] == 1]
+        neg_indices = [i for i in indices if ys[i] == 0]
+
+
+    lower = min(len(pos_indices), len(neg_indices))
+    neg_indices = random.sample(neg_indices, lower)
+    pos_indices = random.sample(pos_indices, lower)
+    indices = pos_indices + neg_indices
     
     
     # we may have just encountered a rare multi-threading diffusers issue (https://github.com/huggingface/diffusers/issues/5749);
@@ -400,8 +408,8 @@ def start(_, calibrate_prompts, user_id, request: gr.Request):
             gr.Button(value='Neither (Space)', interactive=True, visible=False), 
             gr.Button(value='👎', interactive=True),
             gr.Button(value='Start', interactive=False),
-            gr.Button(value='👍 Content', interactive=True),
-            gr.Button(value='👍 Style', interactive=True),
+            gr.Button(value='👍 Content', interactive=True, visible=False),
+            gr.Button(value='👍 Style', interactive=True, visible=False),
             image,
             calibrate_prompts,
             user_id,
@@ -533,9 +541,9 @@ Explore the latent space without text prompts based on your preferences. Learn m
 
         b1 = gr.Button(value='👍', interactive=False, elem_id="like")
     with gr.Row(equal_height=True):
-        b6 = gr.Button(value='👍 Style', interactive=False, elem_id="dislike like")
+        b6 = gr.Button(value='👍 Style', interactive=False, elem_id="dislike like", visible=False)
         
-        b5 = gr.Button(value='👍 Content', interactive=False, elem_id="like dislike")
+        b5 = gr.Button(value='👍 Content', interactive=False, elem_id="like dislike", visible=False)
     with gr.Row():
         text = gr.Textbox(interactive=False, visible=True)
         
