@@ -6,7 +6,7 @@ import torch
 
 # lol
 DEVICE = 'cuda'
-STEPS = 6
+STEPS = 2
 output_hidden_state = False
 device = "cuda"
 dtype = torch.bfloat16
@@ -56,7 +56,7 @@ prompt_list = [p for p in list(set(
 
 
 ####################### Setup Model
-from diffusers import AnimateDiffPipeline, MotionAdapter, EulerDiscreteScheduler, LCMScheduler, AutoencoderTiny, UNet2DConditionModel, AutoencoderKL
+from diffusers import EulerDiscreteScheduler, LCMScheduler, AutoencoderTiny, UNet2DConditionModel, AutoencoderKL, AutoPipelineForText2Image
 from transformers import CLIPTextModel
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
@@ -107,39 +107,31 @@ device_map='cuda')
 #text_encoder = CLIPTextModel.from_pretrained(finetune_path+'/text_encoder/').to(dtype)
 
 #rynmurdock/Sea_Claws
-unet = UNet2DConditionModel.from_pretrained('emilianJR/epiCRealism', subfolder='unet',).to(dtype).to('cpu')
-text_encoder = CLIPTextModel.from_pretrained('emilianJR/epiCRealism', subfolder='text_encoder', 
-device_map='cpu').to(dtype)
+model_id = "stabilityai/stable-diffusion-xl-base-1.0"
+sdxl_lightening = "ByteDance/SDXL-Lightning"
+ckpt = "sdxl_lightning_2step_unet.safetensors"
+unet = UNet2DConditionModel.from_config(model_id, subfolder="unet", low_cpu_mem_usage=True, device_map=DEVICE).to(torch.float16)
+unet.load_state_dict(load_file(hf_hub_download(sdxl_lightening, ckpt)))
 
-adapter = MotionAdapter.from_pretrained("wangfuyun/AnimateLCM")
-pipe = AnimateDiffPipeline.from_pretrained("runwayml/stable-diffusion-v1-5", motion_adapter=adapter, image_encoder=image_encoder, 
-                                            torch_dtype=dtype,     
-                                            unet=unet, text_encoder=text_encoder,)
-pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config, beta_schedule="linear")
-pipe.load_lora_weights("wangfuyun/AnimateLCM", weight_name="AnimateLCM_sd15_t2v_lora.safetensors", adapter_name="lcm-lora",)
-pipe.set_adapters(["lcm-lora"], [.9])
-pipe.fuse_lora()
-pipe.enable_attention_slicing()
-pipe.enable_vae_slicing()
+image_encoder = CLIPVisionModelWithProjection.from_pretrained("h94/IP-Adapter",  subfolder="models/image_encoder", torch_dtype=torch.float16, low_cpu_mem_usage=True, device_map=DEVICE)
+pipe = AutoPipelineForText2Image.from_pretrained(model_id, unet=unet, torch_dtype=torch.float16, variant="fp16", image_encoder=image_encoder, low_cpu_mem_usage=True)
+pipe.unet._load_ip_adapter_weights(torch.load(hf_hub_download('h94/IP-Adapter', 'sdxl_models/ip-adapter_sdxl_vit-h.bin')))
+pipe.load_ip_adapter("h94/IP-Adapter", subfolder="sdxl_models", weight_name="ip-adapter_sdxl_vit-h.bin")
+pipe.register_modules(image_encoder = image_encoder)
+pipe.set_ip_adapter_scale(0.4)
 
+#pipe.vae = AutoencoderTiny.from_pretrained("madebyollin/taesdxl", torch_dtype=torch.float16, low_cpu_mem_usage=True)
+pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing")
 
-#pipe = AnimateDiffPipeline.from_pretrained('emilianJR/epiCRealism', torch_dtype=dtype, image_encoder=image_encoder)
-#pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing", beta_schedule="linear")
-#repo = "ByteDance/AnimateDiff-Lightning"
-#ckpt = f"animatediff_lightning_4step_diffusers.safetensors"
+pipe.to(device=DEVICE).to(dtype=dtype)
+output_hidden_state = False
 
-
-pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15_vit-G.bin", map_location='cpu')
-# This IP adapter improves outputs substantially.
-target_blocks = {"up": {'block_1': 1.}, "mid": 1.}
-pipe.set_ip_adapter_scale(target_blocks)
 
 
 
 pipe.unet.fuse_qkv_projections()
 #pipe.enable_free_init(method="gaussian", use_fast_sampling=True)
 
-pipe.to(device=DEVICE)
 #pipe.unet = torch.compile(pipe.unet)
 #pipe.vae = torch.compile(pipe.vae)
 
@@ -184,7 +176,7 @@ def generate_gpu(in_im_embs, prompt='the scene'):
         in_im_embs = in_im_embs / in_im_embs.abs().max() * 3
         output = pipe(prompt=prompt, guidance_scale=1, added_cond_kwargs={}, ip_adapter_image_embeds=[in_im_embs], num_inference_steps=STEPS)
         im_emb, _ = pipe.encode_image(
-                    output.frames[0][len(output.frames[0])//2], 'cuda', 1, output_hidden_state
+                    output.images[0], 'cuda', 1, output_hidden_state
                 )
         im_emb = im_emb.detach().to('cpu').to(torch.float32)
     return output, im_emb
@@ -192,20 +184,17 @@ def generate_gpu(in_im_embs, prompt='the scene'):
 
 def generate(in_im_embs, prompt='the scene'):
     output, im_emb = generate_gpu(in_im_embs, prompt)
-    nsfw = maybe_nsfw(output.frames[0][len(output.frames[0])//2])
+    nsfw = maybe_nsfw(output.images[0])
     
     name = str(uuid.uuid4()).replace("-", "")
-    path = f"/tmp/{name}.mp4"
+    path = f"/tmp/{name}.png"
     
     if nsfw:
         gr.Warning("NSFW content detected.")
         # TODO could return an automatic dislike of auto dislike on the backend for neither as well; just would need refactoring.
         return None, im_emb
     
-    
-    output.frames[0] = output.frames[0] + list(reversed(output.frames[0]))
-
-    write_video(path, output.frames[0])
+    output.images[0].save(path)
     return path, im_emb
 
 
@@ -223,7 +212,7 @@ def solver(embs, ys):
     
 #     if ys.abs().max() != 0:
 #         ys = ys / ys.abs().max()
-    ys = (ys - .5) * 2
+    #ys = (ys - .5) * 2
 
     #if embs.norm() != 0:
     #    embs = embs / embs.norm()
@@ -454,7 +443,8 @@ def choose(img, choice, calibrate_prompts, user_id, request: gr.Request):
     
     # if we detected NSFW, leave that area of latent space regardless of how they rated chosen.
     # TODO skip allowing rating & just continue
-    if img == None:
+
+    if img is None:
         print('NSFW -- choice is disliked')
         choice = [0, 0]
     
@@ -527,27 +517,27 @@ Explore the latent space without text prompts based on your preferences. Learn m
     user_id = gr.State()
     # calibration videos -- this is a misnomer now :D
     calibrate_prompts = gr.State([
-    './first.mp4',
-    './second.mp4',
-    './third.mp4',
-    './fourth.mp4',
-    './fifth.mp4',
-    './sixth.mp4',
+    './first.png',
+    './second.png',
+    './third.png',
+    './fourth.png',
+    './fifth.png',
     ])
     def l():
         return None
 
     with gr.Row(elem_id='output-image'):
-        img = gr.Video(
+        img = gr.Image(
         label='Lightning',
-        autoplay=True,
+#        autoplay=True,
         interactive=False,
-        height=512,
-        width=512,
+#        height=512,
+#        width=512,
         #include_audio=False,
-        elem_id="video_output"
+        elem_id="video_output",
+        type='filepath',
        )
-        img.play(l, js='''document.querySelector('[data-testid="Lightning-player"]').loop = true''')
+        #img.play(l, js='''document.querySelector('[data-testid="Lightning-player"]').loop = true''')
     
     
     
@@ -623,16 +613,11 @@ def encode_space(x):
 
 # prep our calibration videos
 for im, txt in [ # TODO more movement
-    ('./first.mp4', 'describe the scene: a painted still life in red & bright colors'),
-    ('./second.mp4', 'describe the scene: surrealist landscape with solid red circle'),
-    ('./third.mp4', 'describe the scene: geometric abstract art'),
-    ('./fourth.mp4', 'describe the scene: a painted landscape on fire'),
-    ('./fifth.mp4', 'describe the scene: a bizarre plant growing from a glass vase'),
-    ('./sixth.mp4', 'describe the scene: dark fractals'),
-    ('./seventh.mp4', 'describe the scene: a dark object'),
-    ('./eigth.mp4', 'describe the scene: an image: an object; small tree made of green & black wood'),
-    ('./ninth.mp4', 'describe the scene: an image of gorgeous flowing art; a sunflower'),
-    ('./tenth.mp4', 'describe the scene: a fluffy creature turns towards you'),
+    ('./first.png', 'describe the scene: a sketch'),
+    ('./second.png', 'describe the scene: omens in the suburbs'),
+    ('./third.png', 'describe the scene: geometric abstract art of a windmill'),
+    ('./fourth.png', 'describe the scene: memento mori'),
+    ('./fifth.png', 'describe the scene: a green plate with anespresso'),
     ]:
     tmp_df = pd.DataFrame(columns=['paths', 'embeddings', 'ips', 'user:rating', 'text', 'gemb'])
     tmp_df['paths'] = [im]
