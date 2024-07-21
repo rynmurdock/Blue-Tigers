@@ -223,7 +223,9 @@ def solver(embs, ys):
     
 #     if ys.abs().max() != 0:
 #         ys = ys / ys.abs().max()
-    ys = (ys - .5) * 2
+
+# 0 to 1 is much preferable!
+#    ys = (ys - .5) * 2
 
     #if embs.norm() != 0:
     #    embs = embs / embs.norm()
@@ -348,16 +350,16 @@ def background_next_image():
                 glob_idx = 0
 
 
-            if glob_idx % 7 == 0:
+            if glob_idx % 4 == 0:
                 text = prompt_list[glob_idx]
             else:
-                text = 'describe a compelling scene:'
-            if len(gembs) > 4:
-                new_gem = get_user_emb(gembs, [y[0] for y in ys])
-                text, _ = generate_gemm(in_embs=new_gem, prompt=text)
-                _, gembs = cal_generate(prompt=text)
-            else:
-                text, gembs = generate_gemm(in_embs=torch.zeros(1, EMB_LEN))
+                text = 'a compelling scene'
+            #if len(gembs) > 4:
+            #    new_gem = get_user_emb(gembs, [y[0] for y in ys])
+            #    text, _ = generate_gemm(in_embs=new_gem, prompt=text)
+            #    _, gembs = cal_generate(prompt=text)
+            #else:
+            #    text, gembs = generate_gemm(in_embs=torch.zeros(1, EMB_LEN))
             img, embs = generate(user_emb, text)
             
             if img:
@@ -533,6 +535,7 @@ Explore the latent space without text prompts based on your preferences. Learn m
     './fourth.mp4',
     './fifth.mp4',
     './sixth.mp4',
+    './tenth.mp4',
     ])
     def l():
         return None
