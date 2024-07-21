@@ -131,8 +131,8 @@ pipe.enable_vae_slicing()
 
 pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15_vit-G.bin", map_location='cpu')
 # This IP adapter improves outputs substantially.
-target_blocks = {"up": {'block_1': 1.}, "mid": 1.}
-pipe.set_ip_adapter_scale(target_blocks)
+# target_blocks = {"up": {'block_1': 1.}, "mid": 1.}
+pipe.set_ip_adapter_scale(.8)
 
 
 
@@ -150,12 +150,12 @@ from transformers import AutoTokenizer
 
 import gemma_portion
 
-tokenizer = AutoTokenizer.from_pretrained("google/gemma-7b-it",)
-gem_model = gemma_portion.GemmaForCausalLM.from_pretrained("google/gemma-7b-it", 
-                                                                device_map="auto", 
-                                                                torch_dtype=torch.bfloat16, load_in_4bit=True)
-gem_model._sample = MethodType(gemma_portion._sample, gem_model)
-gem_model.generate = MethodType(gemma_portion.generate, gem_model)
+#tokenizer = AutoTokenizer.from_pretrained("google/gemma-7b-it",)
+#gem_model = gemma_portion.GemmaForCausalLM.from_pretrained("google/gemma-7b-it", 
+#                                                                device_map="auto", 
+#                                                                torch_dtype=torch.bfloat16, load_in_4bit=True)
+#gem_model._sample = MethodType(gemma_portion._sample, gem_model)
+#gem_model.generate = MethodType(gemma_portion.generate, gem_model)
 
 # SEE GEMMA_PORTION FOR PLUCK_LAYER
 
@@ -179,6 +179,7 @@ def cal_generate(prompt, in_embs=torch.zeros(1, 1, EMB_LEN),):
 @spaces.GPU()
 def generate_gpu(in_im_embs, prompt='the scene'):
     with torch.no_grad():
+        pipe.set_ip_adapter_scale(.3 + random.random()*.7)
         print(prompt)
         in_im_embs = in_im_embs.to('cuda').unsqueeze(0).unsqueeze(0)
         in_im_embs = in_im_embs / in_im_embs.abs().max() * 3
@@ -332,6 +333,7 @@ def background_next_image():
             if len(rated_from_user) >= 15:
                 oldest = rated_from_user.iloc[0]['paths']
                 prevs_df = prevs_df[prevs_df['paths'] != oldest]
+            
             # we don't compute more after n are in the queue for them
             if len(unrated_from_user) >= 10:
                 continue
@@ -643,11 +645,11 @@ for im, txt in [ # TODO more movement
     image = image[len(image)//2]
     im_emb = encode_space(image)
     
-    _, gemb = cal_generate(prompt=txt)
+    #_, gemb = cal_generate(prompt=txt)
 
     tmp_df['embeddings'] = [im_emb.detach().to('cpu')]
     tmp_df['user:rating'] = [{' ': ' '}]
-    tmp_df['gemb'] = [gemb.detach().to('cpu')]
+    #tmp_df['gemb'] = [gemb.detach().to('cpu')]
     tmp_df['text'] = [txt]
     prevs_df = pd.concat((prevs_df, tmp_df))
 
