@@ -25,19 +25,30 @@ import random
 import time
 
 import kornia
-from diffusers import LCMScheduler
-from diffusers.models import ImageProjection
 import torch
 import torchvision
+
+from diffusers import StableDiffusionXLPipeline, UNet2DConditionModel, EulerDiscreteScheduler
+from huggingface_hub import hf_hub_download
+from safetensors.torch import load_file
+
 from patch_sdxl import SDEmb
 
-model_id = "stabilityai/stable-diffusion-xl-base-1.0"
-lcm_lora_id = "latent-consistency/lcm-lora-sdxl"
+device = 'cuda'
+dtype = torch.float16
 
-pipe = SDEmb.from_pretrained(model_id, variant="fp16")
-pipe.load_lora_weights(lcm_lora_id)
-pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
-pipe.to(device="cuda", dtype=torch.float16)
+base = "stabilityai/stable-diffusion-xl-base-1.0"
+repo = "ByteDance/SDXL-Lightning"
+ckpt = "sdxl_lightning_8step_unet.safetensors" # Use the correct ckpt for your step setting!
+
+# Load model.
+unet = UNet2DConditionModel.from_config(base, subfolder="unet").to(device, dtype)
+unet.load_state_dict(load_file(hf_hub_download(repo, ckpt), device=device))
+pipe = SDEmb.from_pretrained(base, unet=unet, torch_dtype=dtype, variant="fp16").to(device)
+
+# Ensure sampler uses "trailing" timesteps.
+pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing")
+
 
 pipe.load_ip_adapter("h94/IP-Adapter", subfolder="sdxl_models", weight_name="ip-adapter_sdxl.bin")
 output_hidden_state = False
@@ -49,16 +60,16 @@ pipe.set_ip_adapter_scale(1)
 #model = torch.compile(model)
 
 
-transform = kornia.augmentation.RandomResizedCrop(size=(224, 224), scale=(.3, .5))
+# transform = kornia.augmentation.RandomResizedCrop(size=(224, 224), scale=(.3, .5))
 nom = torchvision.transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
 def patch_encode_image(image):
-    image = torch.tensor(torchvision.transforms.functional.pil_to_tensor(image).to(torch.float16)).repeat(16, 1, 1, 1).to('cuda')
-    image = image / 255
-    patches = nom(transform(image))
+    image = torch.tensor(torchvision.transforms.functional.pil_to_tensor(image).to(torch.float16)).to('cuda')[None, ...]
+    image = torch.nn.functional.interpolate(image, (224, 224)) / 255
+    patches = nom(image)
     output, _ = pipe.encode_image(
                 patches, 'cuda', 1, output_hidden_state
             )
-    return output.mean(0, keepdim=True)
+    return output
 
 
 
@@ -134,8 +145,8 @@ def next_image():
 
             ####### optional step; we could take the prior output instead
             with torch.cuda.amp.autocast():
-                pooled_embeds, _ = pipe.encode_image(
-                image[0], 'cuda', 1, output_hidden_state
+                pooled_embeds = patch_encode_image(
+                image[0]
                 )
             #######
 
@@ -154,34 +165,52 @@ def next_image():
             if mini < 1:
                 feature_embs = torch.stack([torch.randn(1280), torch.randn(1280)])
                 ys_t = [0, 1]
+                print('Not enough ratings.')
             else:
-                indices = random.sample(pos_indices, mini) + random.sample(neg_indices, mini)
+                # indices = random.sample(pos_indices, mini) + random.sample(neg_indices, mini)
                 ys_t = [ys[i] for i in indices]
+                feature_embs = torch.stack([embs[e].detach().cpu() for e in indices]).squeeze()
+
+                # # balance pos/negatives?
+                # for e in indices:
+                #     nw = (len(indices) / len(neg_indices))
+                #     w = (len(indices) / len(pos_indices))
+                #     feature_embs[e] = feature_embs[e] * w if ys_t[e] > .5 else feature_embs[e] * nw
                 
-                #if len(pos_indices) > 15:
+                # if len(pos_indices) > 8:
                 #    to_drop = pos_indices.pop(0)
                 #    ys.pop(to_drop)
                 #    embs.pop(to_drop)
                 #    print('\n\n\ndropping\n\n\n')
-                #elif len(neg_indices) > 15:
+                # elif len(neg_indices) > 8:
                 #    to_drop = neg_indices.pop(0)
                 #    ys.pop(to_drop)
                 #    embs.pop(to_drop)
                 #    print('\n\n\ndropping\n\n\n')
                 
                 
-
-                feature_embs = torch.stack([embs[e][0].detach().cpu() for e in indices])
-                #scaler = preprocessing.StandardScaler().fit(feature_embs)
-                #feature_embs = scaler.transform(feature_embs)
+                # scaler = preprocessing.StandardScaler().fit(feature_embs)
+                # feature_embs = scaler.transform(feature_embs)
+                # ys_t = ys
+                
                 print(np.array(feature_embs).shape, np.array(ys_t).shape)
             
+            # sol = LogisticRegression().fit(np.array(feature_embs), np.array(torch.tensor(ys_t).unsqueeze(1).float() * 2 - 1)).coef_
+            # sol = torch.linalg.lstsq(torch.tensor(ys_t).unsqueeze(1).float()*2-1, torch.tensor(feature_embs).float(),).solution
+            # neg_sol = torch.linalg.lstsq((torch.tensor(ys_t).unsqueeze(1).float() - 1) * -1, torch.tensor(feature_embs).float()).solution
+            # sol = torch.tensor(sol, dtype=dtype).to(device)
+
+
+            pos_sol = torch.stack([feature_embs[i] for i in range(len(ys_t)) if ys_t[i] > .5]).mean(0, keepdim=True).to(device, dtype)
+            neg_sol = torch.stack([feature_embs[i] for i in range(len(ys_t)) if ys_t[i] < .5]).mean(0, keepdim=True).to(device, dtype)
             
-            sol = LogisticRegression().fit(np.array(feature_embs), np.array(torch.tensor(ys_t).unsqueeze(1).float())).coef_
-            
-            
-            #sol = torch.linalg.lstsq(torch.tensor(ys).unsqueeze(1).float() / 2 + .5, torch.tensor(feature_embs).float()).solution
-            sol = torch.tensor(sol, dtype=torch.float16).to('cuda')
+            # could j have a base vector of a black image
+            latest_pos = (random.sample([feature_embs[i] for i in range(len(ys_t)) if ys_t[i] > .5], 1)[0]).to(device, dtype)
+
+            dif = pos_sol - neg_sol
+            dif = ((dif / dif.std()) * latest_pos.std())
+
+            sol = latest_pos + dif
 
             if global_idx % 2 == 0:
                 w = 32
@@ -206,8 +235,8 @@ def next_image():
 
             ####### optional step; we could take the prior output instead
             with torch.cuda.amp.autocast():
-                pooled_embeds, _ = pipe.encode_image(
-                image[0], 'cuda', 1, output_hidden_state
+                pooled_embeds = patch_encode_image(
+                image[0]
                 )
             #######
             print(pooled_embeds.max(), image_emb.max())
