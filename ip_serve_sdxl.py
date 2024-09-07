@@ -195,29 +195,29 @@ def next_image():
                 
                 print(np.array(feature_embs).shape, np.array(ys_t).shape)
             
-            # sol = LogisticRegression().fit(np.array(feature_embs), np.array(torch.tensor(ys_t).unsqueeze(1).float() * 2 - 1)).coef_
+            sol = LogisticRegression().fit(np.array(feature_embs), np.array(torch.tensor(ys_t).unsqueeze(1).float() * 2 - 1)).coef_
             # sol = torch.linalg.lstsq(torch.tensor(ys_t).unsqueeze(1).float()*2-1, torch.tensor(feature_embs).float(),).solution
             # neg_sol = torch.linalg.lstsq((torch.tensor(ys_t).unsqueeze(1).float() - 1) * -1, torch.tensor(feature_embs).float()).solution
-            # sol = torch.tensor(sol, dtype=dtype).to(device)
+            sol = torch.tensor(sol, dtype=dtype).to(device)
 
 
-            pos_sol = torch.stack([feature_embs[i] for i in range(len(ys_t)) if ys_t[i] > .5]).mean(0, keepdim=True).to(device, dtype)
-            neg_sol = torch.stack([feature_embs[i] for i in range(len(ys_t)) if ys_t[i] < .5]).mean(0, keepdim=True).to(device, dtype)
+            # pos_sol = torch.stack([feature_embs[i] for i in range(len(ys_t)) if ys_t[i] > .5]).mean(0, keepdim=True).to(device, dtype)
+            # neg_sol = torch.stack([feature_embs[i] for i in range(len(ys_t)) if ys_t[i] < .5]).mean(0, keepdim=True).to(device, dtype)
             
             # could j have a base vector of a black image
             latest_pos = (random.sample([feature_embs[i] for i in range(len(ys_t)) if ys_t[i] > .5], 1)[0]).to(device, dtype)
 
-            dif = pos_sol - neg_sol
-            dif = ((dif / dif.std()) * latest_pos.std())
+            dif = sol#pos_sol -  neg_sol
+            dif = 32 * ((dif / dif.std()) * latest_pos.std())
 
             sol = latest_pos + dif
 
             if global_idx % 2 == 0:
-                w = 32
+                w = 1
                 prompt = random.choice(prompt_list)
                 pipe.set_ip_adapter_scale(.7)
             else:
-                w = 32
+                w = 1
                 prompt = 'an image'
                 pipe.set_ip_adapter_scale(1.)
             
