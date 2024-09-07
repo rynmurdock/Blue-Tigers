@@ -117,7 +117,7 @@ pipe.fuse_lora()
 pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15_vit-G.bin", map_location='cpu')
 # This IP adapter improves outputs substantially.
 pipe.set_ip_adapter_scale(.6)
-pipe.unet.fuse_qkv_projections()
+# pipe.unet.fuse_qkv_projections()
 #pipe.enable_free_init(method="gaussian", use_fast_sampling=True)
 
 pipe.to(device=DEVICE)
@@ -130,8 +130,8 @@ pipe.to(device=DEVICE)
 from transformers import AutoProcessor, PaliGemmaForConditionalGeneration, BitsAndBytesConfig
 
 quantization_config = BitsAndBytesConfig(load_in_4bit=True)
-pali = PaliGemmaForConditionalGeneration.from_pretrained('google/paligemma-3b-pt-224', token='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', torch_dtype=dtype, quantization_config=quantization_config).eval()
-processor = AutoProcessor.from_pretrained('google/paligemma-3b-pt-224', token='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')
+pali = PaliGemmaForConditionalGeneration.from_pretrained('google/paligemma-3b-pt-224', token='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', torch_dtype=dtype, quantization_config=quantization_config).eval()
+processor = AutoProcessor.from_pretrained('google/paligemma-3b-pt-224', token='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')
 
 
 
