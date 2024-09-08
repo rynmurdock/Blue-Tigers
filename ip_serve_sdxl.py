@@ -161,33 +161,24 @@ def next_image():
             neg_indices = [i for i in indices if ys[i] <= .5]
             
             mini = min(len(pos_indices), len(neg_indices))
+
+            if len(ys) > 20: # drop earliest of whichever of neg or pos is most abundant
+                if len(pos_indices) > len(neg_indices):
+                    ind = pos_indices[0]
+                else:
+                    ind = neg_indices[0]
+                ys.pop(ind)
+                embs.pop(ind)
+                print('Dropping at 20')
             
             if mini < 1:
                 feature_embs = torch.stack([torch.randn(1280), torch.randn(1280)])
                 ys_t = [0, 1]
                 print('Not enough ratings.')
             else:
-                # indices = random.sample(pos_indices, mini) + random.sample(neg_indices, mini)
+                indices = range(len(ys))
                 ys_t = [ys[i] for i in indices]
                 feature_embs = torch.stack([embs[e].detach().cpu() for e in indices]).squeeze()
-
-                # # balance pos/negatives?
-                # for e in indices:
-                #     nw = (len(indices) / len(neg_indices))
-                #     w = (len(indices) / len(pos_indices))
-                #     feature_embs[e] = feature_embs[e] * w if ys_t[e] > .5 else feature_embs[e] * nw
-                
-                # if len(pos_indices) > 8:
-                #    to_drop = pos_indices.pop(0)
-                #    ys.pop(to_drop)
-                #    embs.pop(to_drop)
-                #    print('\n\n\ndropping\n\n\n')
-                # elif len(neg_indices) > 8:
-                #    to_drop = neg_indices.pop(0)
-                #    ys.pop(to_drop)
-                #    embs.pop(to_drop)
-                #    print('\n\n\ndropping\n\n\n')
-                
                 
                 # scaler = preprocessing.StandardScaler().fit(feature_embs)
                 # feature_embs = scaler.transform(feature_embs)
@@ -195,10 +186,10 @@ def next_image():
                 
                 print(np.array(feature_embs).shape, np.array(ys_t).shape)
             
-            sol = LogisticRegression().fit(np.array(feature_embs), np.array(torch.tensor(ys_t).unsqueeze(1).float() * 2 - 1)).coef_
+            sol = LinearSVC(class_weight='balanced').fit(np.array(feature_embs), np.array(torch.tensor(ys_t).unsqueeze(1).float() * 2 - 1)).coef_
             # sol = torch.linalg.lstsq(torch.tensor(ys_t).unsqueeze(1).float()*2-1, torch.tensor(feature_embs).float(),).solution
             # neg_sol = torch.linalg.lstsq((torch.tensor(ys_t).unsqueeze(1).float() - 1) * -1, torch.tensor(feature_embs).float()).solution
-            sol = torch.tensor(sol, dtype=dtype).to(device)
+            dif = torch.tensor(sol, dtype=dtype).to(device)
 
 
             # pos_sol = torch.stack([feature_embs[i] for i in range(len(ys_t)) if ys_t[i] > .5]).mean(0, keepdim=True).to(device, dtype)
@@ -207,10 +198,10 @@ def next_image():
             # could j have a base vector of a black image
             latest_pos = (random.sample([feature_embs[i] for i in range(len(ys_t)) if ys_t[i] > .5], 1)[0]).to(device, dtype)
 
-            dif = sol#pos_sol -  neg_sol
-            dif = 32 * ((dif / dif.std()) * latest_pos.std())
+            # dif = pos_sol -  sol
+            dif = ((dif / dif.std()) * latest_pos.std())
 
-            sol = latest_pos + dif
+            sol = (1*latest_pos + 3*dif)/4
 
             if global_idx % 2 == 0:
                 w = 1
@@ -244,7 +235,7 @@ def next_image():
             
             print('\n\n**********',prompt,'\n**********')
 
-            torch.save(sol, f'./{start_time}.pt')
+            # torch.save(sol, f'./{start_time}.pt')
             return image[0]
             
 
@@ -307,5 +298,5 @@ with gr.Blocks(css=css) as demo:
                  [b4],
                  [b1, b2, b3, b4, img,])
 
-demo.launch(server_name="0.0.0.0")  # Share your demo with just 1 extra parameter 🚀
+demo.launch(server_name="0.0.0.0", share=True)  # Share your demo with just 1 extra parameter 🚀
 
